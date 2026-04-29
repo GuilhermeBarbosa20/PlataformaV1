@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
 import os
 import time
@@ -13,6 +14,11 @@ from typing import Dict, List, Optional
 from urllib import error, request
 from uuid import uuid4
 from openai import OpenAI
+try:
+    from PIL import Image, ImageOps
+except Exception:  # noqa: BLE001
+    Image = None  # type: ignore[assignment]
+    ImageOps = None  # type: ignore[assignment]
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 STATIC_GENERATED_DIR = BASE_DIR / "static" / "generated"
@@ -229,17 +235,20 @@ class DesignerAgent:
             reference_image_urls=reference_image_urls,
         )
         errors: List[str] = []
+        tried_providers: set[str] = set()
 
         # Quando há referência de identidade (rosto), evitamos começar por
         # motores text-to-image para não perder semelhança facial.
         if has_references and normalized_references["public_urls"] or normalized_references["data_urls"]:
             try:
+                prioritized_provider = "https://nanobananapro.cloud/api/v1/image/nano-banana"
                 data = self._call_nanobananapro(
-                    "https://nanobananapro.cloud/api/v1/image/nano-banana",
+                    prioritized_provider,
                     prompt=prompt,
                     reference_image_urls=normalized_references["public_urls"],
                     reference_image_data_urls=normalized_references["data_urls"],
                 )
+                tried_providers.add(prioritized_provider)
                 image_url = self._extract_image_url(data)
                 if image_url:
                     return {
@@ -256,7 +265,9 @@ class DesignerAgent:
                     }
                 errors.append("nanobananapro: sem imagem no resultado para image-to-image.")
             except RuntimeError as exc:
-                errors.append(f"nanobananapro(image-to-image): {exc}")
+                errors.append(
+                    f"nanobananapro(image-to-image): {self._format_provider_error_message(str(exc))}"
+                )
 
         if self._openai_api_key and normalized_references["data_urls"]:
             try:
@@ -271,7 +282,9 @@ class DesignerAgent:
                     "provider": f"openai-{self._openai_image_model}",
                 }
             except RuntimeError as exc:
-                errors.append(f"openai-{self._openai_image_model}: {exc}")
+                errors.append(
+                    f"openai-{self._openai_image_model}: {self._format_provider_error_message(str(exc))}"
+                )
 
         # Se não estivermos a usar referência (ou não houver referência válida),
         # tentamos text-to-image na OpenAI para manter máxima aderência ao pedido.
@@ -287,7 +300,9 @@ class DesignerAgent:
                     "provider": f"openai-{self._openai_image_model}-text",
                 }
             except RuntimeError as exc:
-                errors.append(f"openai-{self._openai_image_model}-text: {exc}")
+                errors.append(
+                    f"openai-{self._openai_image_model}-text: {self._format_provider_error_message(str(exc))}"
+                )
 
         if self._hf_api_token and not has_references:
             try:
@@ -298,7 +313,9 @@ class DesignerAgent:
                     "provider": f"huggingface-{self._hf_model}",
                 }
             except RuntimeError as exc:
-                errors.append(f"huggingface-{self._hf_model}: {exc}")
+                errors.append(
+                    f"huggingface-{self._hf_model}: {self._format_provider_error_message(str(exc))}"
+                )
         elif self._hf_api_token and has_references:
             errors.append(
                 "huggingface ignorado: fluxo atual usa text-to-image e não preserva identidade facial com referência."
@@ -317,10 +334,14 @@ class DesignerAgent:
                     "provider": f"google-{self._google_model}",
                 }
             except RuntimeError as exc:
-                errors.append(f"google-{self._google_model}: {exc}")
+                errors.append(
+                    f"google-{self._google_model}: {self._format_provider_error_message(str(exc))}"
+                )
 
         providers_to_try = self._resolve_provider_urls()
         for provider in providers_to_try:
+            if provider in tried_providers:
+                continue
             try:
                 data = self._call_provider(
                     provider=provider,
@@ -347,12 +368,46 @@ class DesignerAgent:
                     }
                 errors.append(f"{provider}: resposta sem URL/base64.")
             except RuntimeError as exc:
-                errors.append(f"{provider}: {exc}")
+                errors.append(f"{provider}: {self._format_provider_error_message(str(exc))}")
+            finally:
+                tried_providers.add(provider)
 
         raise RuntimeError(
-            "Falha ao contactar Nano Banana em todos os endpoints testados. "
-            + " | ".join(errors)
+            "Falha ao gerar imagem em todos os providers configurados. " + " | ".join(errors)
         )
+
+    def _format_provider_error_message(self, raw_error: str) -> str:
+        """Normaliza erros de providers para mensagens curtas e acionáveis.
+
+        A função analisa mensagens de erro HTTP/API devolvidas pelos providers
+        de imagem e mapeia padrões conhecidos para texto claro com ação
+        recomendada. Mantém a mensagem original quando não reconhece o padrão.
+
+        Argumentos:
+            raw_error: Mensagem de erro original capturada no fluxo de geração.
+
+        Retorno:
+            String normalizada e amigável para logs e resposta ao utilizador.
+        """
+
+        normalized = str(raw_error or "").strip()
+        lowered = normalized.lower()
+        if "error code: 1010" in lowered:
+            return (
+                "acesso bloqueado pelo provider (Cloudflare 1010). "
+                "Valida whitelist/IP/chave e tenta outro endpoint."
+            )
+        if "billing_hard_limit_reached" in lowered or "billing hard limit has been reached" in lowered:
+            return (
+                "conta OpenAI sem saldo disponível (billing hard limit reached). "
+                "Atualiza faturação/crédito e volta a tentar."
+            )
+        if "invalid image file or mode" in lowered or "invalid_image_file" in lowered:
+            return (
+                "imagem de referência inválida/incompatível para edição OpenAI. "
+                "Converte a imagem para PNG/JPG (RGB), evita ficheiros corrompidos e tenta novamente."
+            )
+        return normalized
 
     def _should_use_reference_for_generation(
         self,
@@ -428,6 +483,7 @@ class DesignerAgent:
         image_bytes, image_ext = self._data_url_to_binary(reference_image_data_urls[0])
         if not image_bytes:
             raise RuntimeError("Não foi possível converter a referência para binário.")
+        image_bytes, image_ext = self._normalize_openai_edit_image(image_bytes, image_ext)
 
         openai_size = self._size_to_openai_size(size)
         identity_prompt = (
@@ -475,6 +531,50 @@ class DesignerAgent:
             return self._save_base64_image(b64_image)
 
         raise RuntimeError("OpenAI não devolveu URL nem `b64_json` na edição.")
+
+    def _normalize_openai_edit_image(self, image_bytes: bytes, image_ext: str) -> tuple[bytes, str]:
+        """Normaliza imagem para formato compatível com `images.edit` da OpenAI.
+
+        A função tenta garantir que a imagem enviada para edição na OpenAI está
+        num formato estável e suportado. Quando Pillow está disponível, abre o
+        binário, corrige orientação EXIF e converte para PNG em modo RGB para
+        evitar erros de validação como `invalid_image_file` ou `invalid mode`.
+        Sem Pillow, mantém o binário original.
+
+        Argumentos:
+            image_bytes: Conteúdo binário original da referência.
+            image_ext: Extensão inferida a partir da data URL (`.png`, `.jpg`...).
+
+        Retorno:
+            Tuplo `(normalized_bytes, normalized_ext)` pronto para upload no
+            endpoint `images.edit` da OpenAI.
+        """
+
+        normalized_ext = image_ext if image_ext in {".png", ".jpg", ".jpeg", ".webp"} else ".png"
+        if not image_bytes:
+            return image_bytes, normalized_ext
+
+        if Image is None or ImageOps is None:
+            return image_bytes, normalized_ext
+
+        try:
+            with Image.open(io.BytesIO(image_bytes)) as source_image:
+                safe_image = ImageOps.exif_transpose(source_image)
+                if safe_image.mode not in {"RGB", "RGBA"}:
+                    safe_image = safe_image.convert("RGB")
+                elif safe_image.mode == "RGBA":
+                    # A API de edit da OpenAI é mais estável com RGB sem alpha.
+                    safe_image = safe_image.convert("RGB")
+
+                buffer = io.BytesIO()
+                safe_image.save(buffer, format="PNG", optimize=True)
+                normalized_bytes = buffer.getvalue()
+            if normalized_bytes:
+                return normalized_bytes, ".png"
+        except Exception:  # noqa: BLE001
+            return image_bytes, normalized_ext
+
+        return image_bytes, normalized_ext
 
     def _generate_with_openai_text(self, prompt: str, size: str) -> str:
         """Gera imagem por texto com OpenAI quando não há referência obrigatória.

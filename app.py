@@ -1,17 +1,20 @@
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 import json
 import os
+import re
 from pathlib import Path
-from typing import Dict, List, Literal, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple
 import unicodedata
 from urllib import error, request
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from openai import OpenAI
 from pydantic import BaseModel, Field
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -19,6 +22,7 @@ load_dotenv(BASE_DIR / ".env", override=True)
 
 from agents.copywriter import copywriter_agent
 from agents.designer import designer_agent
+from agents.social_media import social_media_agent
 
 
 STATIC_DIR = BASE_DIR / "static"
@@ -28,6 +32,10 @@ COPYWRITER_PHOTO_PATH = Path(
 DESIGNER_PHOTO_PATH = Path(
     r"C:\Users\Gui\.cursor\projects\c-Users-Gui-Desktop-Cursor-Teste-PlataformaV1\assets\c__Users_Gui_AppData_Roaming_Cursor_User_workspaceStorage_5cf04d98823b3ed471fa9fcf2f9a8995_images_image-60079ec3-45f1-4734-bbfb-0c9b44f7606c.png"
 )
+INSTAGRAM_OAUTH_AUTHORIZE_URL = "https://www.facebook.com/v25.0/dialog/oauth"
+INSTAGRAM_GRAPH_API_BASE_URL = "https://graph.facebook.com/v25.0"
+DATA_DIR = BASE_DIR / "data"
+SOCIAL_SNAPSHOTS_FILE = DATA_DIR / "social_media_snapshots.json"
 
 app = FastAPI(
     title="Diretor de Marketing AI",
@@ -36,6 +44,41 @@ app = FastAPI(
 )
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+# Armazenamento em memória para MVP local (single-user).
+_instagram_auth_state: Dict[str, str] = {
+    "access_token": "",
+    "ig_user_id": "",
+    "username": "",
+    "last_error": "",
+}
+
+
+def _get_env_setting(key: str, default: str = "") -> str:
+    """Lê configuração do ambiente com fallback explícito para `.env`.
+
+    A função prioriza variáveis de ambiente já carregadas, mas também consulta
+    diretamente o ficheiro `.env` do projeto para reduzir problemas de reload
+    quando o servidor não atualiza o processo imediatamente.
+
+    Argumentos:
+        key: Nome da variável de ambiente a ler.
+        default: Valor devolvido quando a chave não existe.
+
+    Retorno:
+        String com valor da configuração sem espaços laterais.
+    """
+
+    dotenv_path = BASE_DIR / ".env"
+    if dotenv_path.exists():
+        dotenv_data = dotenv_values(dotenv_path)
+        file_value = dotenv_data.get(key)
+        if file_value is not None and str(file_value).strip():
+            return str(file_value).strip()
+    env_value = os.getenv(key)
+    if env_value is not None and str(env_value).strip():
+        return str(env_value).strip()
+    return default.strip()
 
 AGENT_SLUGS: Dict[str, str] = {
     "Agente Copywriter": "copywriter",
@@ -370,6 +413,122 @@ class DesignerImageGenerateRequest(BaseModel):
         default_factory=list,
         description="URLs de imagens de referência anexadas pelo utilizador.",
     )
+
+
+class SocialMediaChatMessage(BaseModel):
+    """Mensagem individual da chatroom do Agente de Redes Sociais.
+
+    Esta estrutura guarda cada turno da conversa para que o agente tenha
+    contexto ao responder perguntas e ao gerar a análise final de Instagram.
+
+    Argumentos:
+        role: Papel da mensagem (`user` ou `assistant`).
+        content: Texto da mensagem em linguagem natural.
+
+    Retorno:
+        Instância validada para compor o histórico da chatroom.
+    """
+
+    role: Literal["user", "assistant"] = Field(..., description="Autor da mensagem.")
+    content: str = Field(..., min_length=1, description="Conteúdo textual da mensagem.")
+
+
+class SocialMediaChatTurnRequest(BaseModel):
+    """Pedido da próxima resposta conversacional do agente de Redes Sociais.
+
+    O frontend envia o histórico atual da conversa para o backend, que devolve
+    uma resposta curta e contextual do agente, focada em recolher dados úteis
+    para a análise de Instagram.
+
+    Argumentos:
+        messages: Histórico cronológico da chatroom.
+        language: Idioma da resposta do agente (por defeito `pt-PT`).
+
+    Retorno:
+        Instância validada para `POST /agents/social-media/chat-reply`.
+    """
+
+    messages: List[SocialMediaChatMessage] = Field(
+        ..., min_length=1, description="Histórico de mensagens da chatroom."
+    )
+    language: str = Field("pt-PT", min_length=2, description="Idioma da resposta do agente.")
+
+
+class SocialMediaAnalysisRequest(BaseModel):
+    """Pedido da análise estruturada de Instagram a partir da chatroom.
+
+    A função de análise recebe o histórico textual e, opcionalmente, um bloco
+    JSON com métricas de Instagram. O agente cruza ambos para gerar insights e
+    plano de crescimento de curto prazo.
+
+    Argumentos:
+        messages: Histórico cronológico da chatroom.
+        instagram_data: Dados estruturados opcionais para suportar análise.
+        language: Idioma da resposta analítica final.
+
+    Retorno:
+        Instância validada para `POST /agents/social-media/chat-analyze`.
+    """
+
+    messages: List[SocialMediaChatMessage] = Field(
+        ..., min_length=1, description="Histórico de mensagens da chatroom."
+    )
+    instagram_data: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Bloco JSON opcional com métricas de Instagram.",
+    )
+    language: str = Field("pt-PT", min_length=2, description="Idioma da análise final.")
+
+
+class SocialMediaProfileAnalysisRequest(BaseModel):
+    """Pedido de análise automática a partir de username/link de Instagram.
+
+    Este payload permite ao utilizador indicar apenas o identificador público
+    do perfil (@username ou URL). O backend tenta recolher dados públicos da
+    página e envia esse resumo para o agente gerar a análise.
+
+    Argumentos:
+        profile_input: Username (`@nome`) ou URL pública do perfil Instagram.
+        messages: Histórico opcional da conversa para adicionar contexto.
+        language: Idioma da análise final (por defeito `pt-PT`).
+
+    Retorno:
+        Instância validada para `POST /agents/social-media/profile-analyze`.
+    """
+
+    profile_input: str = Field(..., min_length=2, description="Username ou URL do perfil Instagram.")
+    messages: List[SocialMediaChatMessage] = Field(
+        default_factory=list,
+        description="Histórico opcional de mensagens para contexto adicional.",
+    )
+    language: str = Field("pt-PT", min_length=2, description="Idioma da análise final.")
+
+
+class SocialMediaUnifiedAnalysisRequest(BaseModel):
+    """Pedido unificado para análise Instagram com perfil e métricas.
+
+    Este modelo simplifica o frontend para um único botão de análise. O
+    utilizador pode enviar username/link, métricas manuais e séries mensais
+    num único payload. O backend agrega os dados e chama o agente.
+
+    Argumentos:
+        profile_input: Username ou link de perfil Instagram (opcional).
+        instagram_data: Métricas estruturadas adicionais preenchidas no formulário.
+        language: Idioma da análise final (por defeito `pt-PT`).
+
+    Retorno:
+        Instância validada para `POST /agents/social-media/analyze`.
+    """
+
+    profile_input: Optional[str] = Field(
+        None,
+        description="Username ou URL de perfil Instagram para recolha automática no Apify.",
+    )
+    instagram_data: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Métricas manuais estruturadas para reforçar a análise.",
+    )
+    language: str = Field("pt-PT", min_length=2, description="Idioma da análise final.")
 
 
 class MarketingDirector:
@@ -1641,6 +1800,428 @@ def copywriter_chat_reply(payload: CopywriterChatTurnRequest) -> Dict[str, str]:
     return {"reply": reply or "Percebi. Podes dar-me mais contexto para eu refinar a resposta?"}
 
 
+@app.post("/agents/social-media/chat-reply")
+def social_media_chat_reply(payload: SocialMediaChatTurnRequest) -> Dict[str, str]:
+    """Gera a próxima resposta do Agente de Redes Sociais na chatroom.
+
+    Este endpoint mantém a conversa focada em Instagram e recolhe dados úteis
+    para análise acionável de crescimento e engagement.
+
+    Argumentos:
+        payload: Histórico da conversa e idioma preferido.
+
+    Retorno:
+        Dicionário com a chave `reply` para o próximo turno da chatroom.
+
+    Raises:
+        HTTPException: 503 quando a chave OpenAI não está configurada;
+            502 quando a geração da resposta falha no cliente OpenAI.
+    """
+
+    if not social_media_agent.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="OPENAI_API_KEY nao configurada no servidor. Define a variavel de ambiente e reinicia o uvicorn.",
+        )
+
+    try:
+        history = [{"role": item.role, "content": item.content} for item in payload.messages]
+        reply = social_media_agent.generate_chat_reply(
+            messages=history,
+            language=payload.language,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=502,
+            detail=f"Falha ao contactar OpenAI: {exc!s}",
+        ) from exc
+
+    return {
+        "reply": reply
+        or "Percebi. Partilha dados concretos de seguidores, engagement e formatos para eu avançar com precisão."
+    }
+
+
+@app.post("/agents/social-media/chat-analyze")
+def social_media_chat_analyze(payload: SocialMediaAnalysisRequest) -> Dict[str, Any]:
+    """Gera análise estruturada de Instagram com secções orientadas à execução.
+
+    O endpoint cruza a conversa da chatroom com os dados estruturados enviados
+    e devolve um output padronizado para tomada de decisão no MVP.
+
+    Argumentos:
+        payload: Histórico da conversa, dados estruturados e idioma.
+
+    Retorno:
+        Dicionário com insights, problemas, oportunidades, ações prioritárias,
+        ideias de conteúdo e plano de crescimento de curto prazo.
+
+    Raises:
+        HTTPException: 503 quando a chave OpenAI não está configurada;
+            502 quando a análise falha no cliente OpenAI.
+    """
+
+    if not social_media_agent.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="OPENAI_API_KEY nao configurada no servidor. Define a variavel de ambiente e reinicia o uvicorn.",
+        )
+
+    try:
+        history = [{"role": item.role, "content": item.content} for item in payload.messages]
+        response = social_media_agent.analyze_instagram_data(
+            messages=history,
+            instagram_data=payload.instagram_data,
+            language=payload.language,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=502,
+            detail=f"Falha ao processar análise de Instagram: {exc!s}",
+        ) from exc
+
+    response["source"] = "social-media-chatroom"
+    response["conversation_turns"] = len(payload.messages)
+    return response
+
+
+@app.post("/agents/social-media/profile-analyze")
+def social_media_profile_analyze(payload: SocialMediaProfileAnalysisRequest) -> Dict[str, Any]:
+    """Gera análise usando apenas username/link público de Instagram.
+
+    Este endpoint resolve o identificador do perfil, tenta extrair métricas
+    públicas básicas da página web do Instagram e chama o agente para produzir
+    a análise estruturada com foco em ações práticas.
+
+    Argumentos:
+        payload: Username/link, histórico opcional e idioma da análise.
+
+    Retorno:
+        Dicionário de análise com metadados da recolha pública executada.
+
+    Raises:
+        HTTPException: 422 quando o input do perfil é inválido; 503 quando a
+            chave OpenAI não está configurada; 502 em falha de recolha/análise.
+    """
+
+    if not social_media_agent.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="OPENAI_API_KEY nao configurada no servidor. Define a variavel de ambiente e reinicia o uvicorn.",
+        )
+
+    username = _extract_instagram_username(payload.profile_input)
+    if not username:
+        raise HTTPException(
+            status_code=422,
+            detail="Input inválido. Usa um @username ou URL pública do Instagram.",
+        )
+
+    try:
+        public_profile_data = _fetch_instagram_public_profile(username)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    history = [{"role": item.role, "content": item.content} for item in payload.messages]
+    if not history:
+        history = [
+            {
+                "role": "user",
+                "content": (
+                    f"Analisa o perfil @{username} com base nos dados públicos recolhidos e cria ações concretas de curto prazo."
+                ),
+            }
+        ]
+
+    try:
+        response = social_media_agent.analyze_instagram_data(
+            messages=history,
+            instagram_data=public_profile_data,
+            language=payload.language,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=502,
+            detail=f"Falha ao processar análise de perfil: {exc!s}",
+        ) from exc
+
+    response["source"] = "social-media-public-profile"
+    response["profile_username"] = username
+    response["public_profile_data"] = public_profile_data
+    return response
+
+
+@app.post("/agents/social-media/analyze")
+def social_media_unified_analyze(payload: SocialMediaUnifiedAnalysisRequest) -> Dict[str, Any]:
+    """Executa análise Instagram com perfil único e comparação temporal.
+
+    Este endpoint recebe o perfil Instagram, recolhe dados pelo Apify Scraper,
+    guarda snapshot local e compara evolução com snapshots anteriores
+    (1 semana, 2 semanas e 1 mês). O pacote final segue para o agente IA para
+    interpretar mudanças, causas prováveis e ações de melhoria.
+
+    Argumentos:
+        payload: Perfil Instagram, dados opcionais extra e idioma final.
+
+    Retorno:
+        Dicionário com análise estruturada, comparativos temporais e metadados.
+
+    Raises:
+        HTTPException: 422 quando o perfil é inválido; 503 quando OpenAI não
+            está configurada; 502 quando a recolha no Apify falha.
+    """
+
+    if not social_media_agent.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="OPENAI_API_KEY nao configurada no servidor. Define a variavel de ambiente e reinicia o uvicorn.",
+        )
+
+    profile_raw = str(payload.profile_input or "").strip()
+    username = _extract_instagram_username(profile_raw)
+    if not username:
+        raise HTTPException(
+            status_code=422,
+            detail="`profile_input` inválido. Usa um @username ou URL pública do Instagram.",
+        )
+
+    connected_token = _instagram_auth_state.get("access_token", "").strip()
+    connected_username = str(_instagram_auth_state.get("username", "")).strip().lower()
+    should_use_authenticated = bool(connected_token and connected_username and connected_username == username.lower())
+
+    if should_use_authenticated:
+        try:
+            profile_data = _fetch_authenticated_instagram_data(
+                access_token=connected_token,
+                ig_user_id=str(_instagram_auth_state.get("ig_user_id", "")).strip(),
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+    else:
+        try:
+            profile_data = _fetch_instagram_public_profile(username)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    profile_username = str(profile_data.get("profile") or username).strip()
+    snapshot = _build_social_snapshot(profile_username, profile_data)
+    _save_social_snapshot(profile_username, snapshot)
+    comparisons = _build_snapshot_comparisons(profile_username, snapshot)
+
+    merged_data: Dict[str, Any] = {}
+    merged_data.update(profile_data)
+    manual_data = payload.instagram_data or {}
+    if isinstance(manual_data, dict) and manual_data:
+        merged_data.update(manual_data)
+    merged_data["comparisons"] = comparisons
+    if not should_use_authenticated:
+        derived_public_metrics = _compute_public_instagram_metrics(merged_data)
+        merged_data.update(derived_public_metrics)
+
+    growth_one_week = ((comparisons.get("one_week") or {}).get("followers") or {}).get("delta")
+    if growth_one_week is not None:
+        merged_data["crescimento_seguidores_7d"] = growth_one_week
+
+    user_prompt_context = (
+        f"Analisa @{profile_username} com foco em evolução temporal: compara com 1 semana, "
+        "2 semanas e 1 mês, identifica o que evoluiu e as causas prováveis dessa evolução."
+    )
+    history = [{"role": "user", "content": user_prompt_context}]
+    try:
+        response = social_media_agent.analyze_instagram_data(
+            messages=history,
+            instagram_data=merged_data,
+            language=payload.language,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=502,
+            detail=f"Falha ao processar análise unificada: {exc!s}",
+        ) from exc
+
+    response["source"] = "social-media-unified-auth" if should_use_authenticated else "social-media-unified-public"
+    response["profile_username"] = profile_username
+    response["public_profile_data"] = merged_data
+    response["comparisons"] = comparisons
+    return response
+
+
+@app.get("/agents/social-media/auth/start")
+def social_media_auth_start() -> RedirectResponse:
+    """Inicia o OAuth da Meta para autorização de análise completa.
+
+    A função cria a URL de consentimento Meta com os scopes necessários para
+    ler páginas e métricas de Instagram profissional. O utilizador é
+    redirecionado para autenticar e autorizar a app.
+
+    Argumentos:
+        Nenhum.
+
+    Retorno:
+        `RedirectResponse` para a página de consentimento OAuth da Meta.
+
+    Raises:
+        HTTPException: 503 quando a app OAuth não está configurada no `.env`.
+    """
+
+    app_id = _get_env_setting("META_APP_ID")
+    redirect_uri = _get_env_setting("META_REDIRECT_URI")
+    if not app_id or not redirect_uri:
+        raise HTTPException(
+            status_code=503,
+            detail="META_APP_ID e META_REDIRECT_URI têm de estar configurados no .env para login Instagram.",
+        )
+    _instagram_auth_state["last_error"] = ""
+
+    scopes = ",".join(
+        ["pages_show_list", "pages_read_engagement", "instagram_basic", "instagram_manage_insights"]
+    )
+    oauth_url = (
+        f"{INSTAGRAM_OAUTH_AUTHORIZE_URL}?client_id={app_id}"
+        f"&redirect_uri={redirect_uri}"
+        "&response_type=code"
+        f"&scope={scopes}"
+    )
+    return RedirectResponse(url=oauth_url, status_code=302)
+
+
+@app.get("/agents/social-media/auth/callback")
+def social_media_auth_callback(code: str = "") -> RedirectResponse:
+    """Processa callback OAuth e guarda token Instagram em memória.
+
+    A função troca o `code` por `access_token`, tenta identificar a conta
+    Instagram profissional associada e guarda esse contexto para análises
+    autenticadas no MVP local.
+
+    Argumentos:
+        code: Código OAuth devolvido pela Meta na query string.
+
+    Retorno:
+        `RedirectResponse` de volta para a página do agente com indicação de
+        sucesso/erro na query string.
+    """
+
+    if not code.strip():
+        _instagram_auth_state["last_error"] = "missing_code"
+        return RedirectResponse(url="/agentes/redes-sociais?auth=error&reason=missing_code", status_code=302)
+
+    try:
+        access_token = _exchange_meta_code_for_token(code)
+        ig_context = _resolve_instagram_context_from_token(access_token)
+    except RuntimeError as exc:
+        reason = str(exc).replace(" ", "_")
+        _instagram_auth_state["last_error"] = str(exc)
+        return RedirectResponse(url=f"/agentes/redes-sociais?auth=error&reason={reason}", status_code=302)
+
+    _instagram_auth_state["access_token"] = access_token
+    _instagram_auth_state["ig_user_id"] = ig_context.get("ig_user_id", "")
+    _instagram_auth_state["username"] = ig_context.get("username", "")
+    _instagram_auth_state["last_error"] = ""
+    return RedirectResponse(url="/agentes/redes-sociais?auth=ok", status_code=302)
+
+
+@app.get("/agents/social-media/auth/status")
+def social_media_auth_status() -> Dict[str, Any]:
+    """Devolve estado atual de autenticação Instagram do MVP.
+
+    A função permite à interface validar se já existe sessão autenticada para
+    análise completa sem pedir login em cada operação.
+
+    Argumentos:
+        Nenhum.
+
+    Retorno:
+        Dicionário com:
+        - `connected`: `True` quando há token válido em memória;
+        - `username`: username da conta autorizada quando conhecido;
+        - `ig_user_id`: identificador interno da conta IG autorizada.
+    """
+
+    token = _instagram_auth_state.get("access_token", "")
+    return {
+        "connected": bool(token),
+        "username": _instagram_auth_state.get("username", ""),
+        "ig_user_id": _instagram_auth_state.get("ig_user_id", ""),
+        "last_error": _instagram_auth_state.get("last_error", ""),
+    }
+
+
+@app.post("/agents/social-media/authenticated-analyze")
+def social_media_authenticated_analyze() -> Dict[str, Any]:
+    """Gera análise completa com dados oficiais via Instagram Graph API.
+
+    O endpoint usa o token OAuth guardado no MVP para obter dados principais da
+    conta autorizada (seguidores, seguidos, media count e métricas de media) e
+    executar análise estratégica com o agente.
+
+    Argumentos:
+        Nenhum.
+
+    Retorno:
+        Dicionário de análise com fonte `social-media-authenticated`.
+
+    Raises:
+        HTTPException: 401 quando não existe sessão autenticada; 502 em falha de
+            leitura na Graph API; 503 quando o agente IA não está configurado.
+    """
+
+    if not social_media_agent.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="OPENAI_API_KEY nao configurada no servidor. Define a variavel de ambiente e reinicia o uvicorn.",
+        )
+
+    access_token = _instagram_auth_state.get("access_token", "").strip()
+    ig_user_id = _instagram_auth_state.get("ig_user_id", "").strip()
+    if not access_token or not ig_user_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Sem sessão Instagram autenticada. Usa o botão 'Login Instagram' primeiro.",
+        )
+
+    try:
+        instagram_data = _fetch_authenticated_instagram_data(access_token=access_token, ig_user_id=ig_user_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    username = str(instagram_data.get("username") or _instagram_auth_state.get("username") or "").strip()
+    history = [
+        {
+            "role": "user",
+            "content": (
+                f"Analisa a conta autenticada @{username or 'instagram'} com foco em crescimento e engagement "
+                "e cria um plano de curto prazo com ações priorizadas."
+            ),
+        }
+    ]
+    try:
+        response = social_media_agent.analyze_instagram_data(
+            messages=history,
+            instagram_data=instagram_data,
+            language="pt-PT",
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=502,
+            detail=f"Falha ao processar análise autenticada: {exc!s}",
+        ) from exc
+
+    response["source"] = "social-media-authenticated"
+    response["profile_username"] = username
+    response["public_profile_data"] = instagram_data
+    return response
+
+
 @app.post("/agents/designer/chat-reply")
 def designer_chat_reply(payload: DesignerChatTurnRequest) -> Dict[str, str]:
     """Gera a próxima resposta do Agente Designer na chatroom.
@@ -1750,6 +2331,800 @@ async def designer_upload_reference_image(file: UploadFile = File(...)) -> Dict[
     return {
         "image_url": f"/static/generated/references/{saved_name}",
         "filename": saved_name,
+    }
+
+
+def _graph_get_json(path: str, access_token: str, query: str = "") -> Dict[str, Any]:
+    """Executa pedido GET na Graph API e devolve JSON parseado.
+
+    A função centraliza chamadas à Graph API com tratamento consistente de
+    erros HTTP/rede, facilitando reutilização no fluxo de autenticação e na
+    recolha de métricas de Instagram.
+
+    Argumentos:
+        path: Caminho da Graph API sem domínio (ex.: `/me/accounts`).
+        access_token: Token OAuth do utilizador autenticado.
+        query: Query string opcional sem `?` (ex.: `fields=id,name`).
+
+    Retorno:
+        Dicionário JSON devolvido pela Graph API.
+
+    Raises:
+        RuntimeError: Quando ocorre erro HTTP, rede ou resposta inválida.
+    """
+
+    safe_path = path if path.startswith("/") else f"/{path}"
+    query_segment = f"&{query}" if query else ""
+    url = (
+        f"{INSTAGRAM_GRAPH_API_BASE_URL}{safe_path}?access_token={access_token}{query_segment}"
+    )
+    headers = {"Accept": "application/json"}
+    http_request = request.Request(url, headers=headers, method="GET")
+    try:
+        with request.urlopen(http_request, timeout=25) as response:
+            body = response.read().decode("utf-8", errors="replace")
+    except error.HTTPError as exc:
+        error_body = ""
+        try:
+            error_body = exc.read().decode("utf-8", errors="replace")
+        except Exception:  # noqa: BLE001
+            error_body = ""
+        raise RuntimeError(
+            f"Graph API HTTP {exc.code}. Body: {error_body[:400] or 'sem detalhe'}"
+        ) from exc
+    except error.URLError as exc:
+        raise RuntimeError(f"Erro de ligação à Graph API: {exc!s}") from exc
+    except (TimeoutError, OSError) as exc:
+        raise RuntimeError(f"Timeout/erro de sistema na Graph API: {exc!s}") from exc
+
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Resposta inválida da Graph API: {body[:250]}") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError("Resposta Graph API inválida (não objeto JSON).")
+    return data
+
+
+def _exchange_meta_code_for_token(code: str) -> str:
+    """Troca `code` OAuth por `access_token` de utilizador Meta.
+
+    A função chama o endpoint oficial de troca de código OAuth e devolve o
+    token de acesso necessário para pedir dados de páginas e Instagram.
+
+    Argumentos:
+        code: Código OAuth devolvido pela Meta na fase de callback.
+
+    Retorno:
+        String com `access_token` de utilizador.
+
+    Raises:
+        RuntimeError: Quando configuração OAuth está incompleta ou a troca falha.
+    """
+
+    app_id = _get_env_setting("META_APP_ID")
+    app_secret = _get_env_setting("META_APP_SECRET")
+    redirect_uri = _get_env_setting("META_REDIRECT_URI")
+    if not app_id or not app_secret or not redirect_uri:
+        raise RuntimeError("Configuração OAuth incompleta (META_APP_ID/SECRET/REDIRECT_URI).")
+
+    token_url = (
+        f"{INSTAGRAM_GRAPH_API_BASE_URL}/oauth/access_token"
+        f"?client_id={app_id}"
+        f"&client_secret={app_secret}"
+        f"&redirect_uri={redirect_uri}"
+        f"&code={code}"
+    )
+    http_request = request.Request(token_url, headers={"Accept": "application/json"}, method="GET")
+    try:
+        with request.urlopen(http_request, timeout=25) as response:
+            body = response.read().decode("utf-8", errors="replace")
+    except error.HTTPError as exc:
+        error_body = ""
+        try:
+            error_body = exc.read().decode("utf-8", errors="replace")
+        except Exception:  # noqa: BLE001
+            error_body = ""
+        raise RuntimeError(f"Falha na troca OAuth: HTTP {exc.code} ({error_body[:250]})") from exc
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"Falha na troca OAuth: {exc!s}") from exc
+
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Resposta inválida no OAuth token exchange.") from exc
+    token = str(data.get("access_token", "")).strip()
+    if not token:
+        raise RuntimeError("OAuth sem access_token devolvido.")
+    return token
+
+
+def _resolve_instagram_context_from_token(access_token: str) -> Dict[str, str]:
+    """Resolve conta Instagram profissional associada a um token de utilizador.
+
+    A função lista páginas do utilizador, procura a primeira página com
+    `instagram_business_account` e devolve o `ig_user_id` e username da conta.
+
+    Argumentos:
+        access_token: Token OAuth de utilizador após consentimento Meta.
+
+    Retorno:
+        Dicionário com:
+        - `ig_user_id`: ID interno da conta Instagram profissional;
+        - `username`: username público da conta.
+
+    Raises:
+        RuntimeError: Quando não existe página ligada a conta Instagram.
+    """
+
+    accounts_data = _graph_get_json("/me/accounts", access_token=access_token)
+    pages = accounts_data.get("data")
+    if not isinstance(pages, list) or not pages:
+        raise RuntimeError("Token sem páginas associadas em /me/accounts.")
+
+    for page in pages:
+        if not isinstance(page, dict):
+            continue
+        page_id = str(page.get("id", "")).strip()
+        if not page_id:
+            continue
+        page_data = _graph_get_json(
+            f"/{page_id}",
+            access_token=access_token,
+            query="fields=instagram_business_account",
+        )
+        ig_account = page_data.get("instagram_business_account")
+        if not isinstance(ig_account, dict):
+            continue
+        ig_user_id = str(ig_account.get("id", "")).strip()
+        if not ig_user_id:
+            continue
+
+        ig_profile = _graph_get_json(
+            f"/{ig_user_id}",
+            access_token=access_token,
+            query="fields=username",
+        )
+        username = str(ig_profile.get("username", "")).strip()
+        return {"ig_user_id": ig_user_id, "username": username}
+
+    raise RuntimeError("Nenhuma página com Instagram Business Account associada.")
+
+
+def _fetch_authenticated_instagram_data(access_token: str, ig_user_id: str) -> Dict[str, Any]:
+    """Obtém dados de Instagram autenticados para análise completa.
+
+    A função recolhe métricas principais da conta IG autorizada e últimas
+    publicações com métricas públicas por media, entregando um bloco estruturado
+    para análise estratégica com o agente de redes sociais.
+
+    Argumentos:
+        access_token: Token OAuth do utilizador autorizado.
+        ig_user_id: ID da conta Instagram Business/Creator.
+
+    Retorno:
+        Dicionário com dados da conta, lista de posts recentes e resumo de
+        método/fonte dos dados autenticados.
+
+    Raises:
+        RuntimeError: Quando a Graph API falha ou devolve payload inválido.
+    """
+
+    profile_data = _graph_get_json(
+        f"/{ig_user_id}",
+        access_token=access_token,
+        query="fields=username,followers_count,follows_count,media_count",
+    )
+    media_data = _graph_get_json(
+        f"/{ig_user_id}/media",
+        access_token=access_token,
+        query="fields=id,caption,media_type,timestamp,like_count,comments_count&limit=12",
+    )
+    media_items = media_data.get("data")
+    normalized_media: List[Dict[str, Any]] = []
+    if isinstance(media_items, list):
+        for item in media_items:
+            if isinstance(item, dict):
+                normalized_media.append(
+                    {
+                        "id": item.get("id"),
+                        "media_type": item.get("media_type"),
+                        "caption": item.get("caption"),
+                        "timestamp": item.get("timestamp"),
+                        "like_count": item.get("like_count"),
+                        "comments_count": item.get("comments_count"),
+                    }
+                )
+
+    return {
+        "platform": "instagram",
+        "profile": profile_data.get("username"),
+        "followers_count": profile_data.get("followers_count"),
+        "following_count": profile_data.get("follows_count"),
+        "posts_count": profile_data.get("media_count"),
+        "recent_posts": normalized_media,
+        "collection_method": "meta_graph_api_authenticated",
+        "data_quality": "alta",
+    }
+
+
+def _load_social_snapshots() -> Dict[str, List[Dict[str, Any]]]:
+    """Carrega snapshots históricos de perfis sociais guardados localmente.
+
+    A função lê o ficheiro de snapshots do MVP e devolve uma estrutura por
+    perfil. Quando o ficheiro não existe ou está inválido, devolve estrutura
+    vazia para continuar o fluxo sem falha.
+
+    Argumentos:
+        Nenhum.
+
+    Retorno:
+        Dicionário no formato `{username: [snapshots...]}`.
+    """
+
+    if not SOCIAL_SNAPSHOTS_FILE.exists():
+        return {}
+    try:
+        raw = SOCIAL_SNAPSHOTS_FILE.read_text(encoding="utf-8")
+        data = json.loads(raw)
+    except Exception:  # noqa: BLE001
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_all_social_snapshots(data: Dict[str, List[Dict[str, Any]]]) -> None:
+    """Persiste no disco o histórico completo de snapshots sociais.
+
+    A função grava os snapshots em JSON no diretório `data` do projeto para
+    permitir comparações temporais em análises futuras.
+
+    Argumentos:
+        data: Dicionário completo de snapshots por username.
+
+    Retorno:
+        Nenhum.
+    """
+
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    SOCIAL_SNAPSHOTS_FILE.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _build_social_snapshot(profile_username: str, profile_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Cria snapshot normalizado do estado atual de um perfil Instagram.
+
+    A função transforma os dados recolhidos pelo scraper num registo temporal
+    único com timestamp UTC e métricas principais usadas nos comparativos.
+
+    Argumentos:
+        profile_username: Username do perfil analisado.
+        profile_data: Dicionário bruto devolvido pelo scraper do perfil.
+
+    Retorno:
+        Dicionário de snapshot com métricas e timestamp de recolha.
+    """
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    return {
+        "captured_at": now_iso,
+        "profile": profile_username,
+        "followers_count": profile_data.get("followers_count"),
+        "following_count": profile_data.get("following_count"),
+        "posts_count": profile_data.get("posts_count"),
+        "engagement_rate": profile_data.get("engagement_rate"),
+    }
+
+
+def _save_social_snapshot(profile_username: str, snapshot: Dict[str, Any]) -> None:
+    """Guarda snapshot de um perfil mantendo histórico compacto no MVP.
+
+    A função adiciona o snapshot ao histórico do perfil e limita o total de
+    entradas para evitar crescimento excessivo do ficheiro local.
+
+    Argumentos:
+        profile_username: Username do perfil alvo.
+        snapshot: Snapshot normalizado a persistir.
+
+    Retorno:
+        Nenhum.
+    """
+
+    all_snapshots = _load_social_snapshots()
+    key = profile_username.lower().strip()
+    history = all_snapshots.get(key)
+    if not isinstance(history, list):
+        history = []
+    history.append(snapshot)
+    history = history[-180:]
+    all_snapshots[key] = history
+    _save_all_social_snapshots(all_snapshots)
+
+
+def _pick_closest_snapshot(
+    snapshots: List[Dict[str, Any]], target_dt: datetime
+) -> Optional[Dict[str, Any]]:
+    """Seleciona snapshot mais próximo de uma data alvo.
+
+    Argumentos:
+        snapshots: Lista de snapshots do perfil.
+        target_dt: Data alvo para comparação (1 semana, 2 semanas, 1 mês).
+
+    Retorno:
+        Snapshot mais próximo da data alvo ou `None` se não houver dados.
+    """
+
+    best_item: Optional[Dict[str, Any]] = None
+    best_delta: Optional[float] = None
+    for item in snapshots:
+        captured_raw = str(item.get("captured_at", "")).strip()
+        if not captured_raw:
+            continue
+        try:
+            captured_dt = datetime.fromisoformat(captured_raw.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        delta = abs((captured_dt - target_dt).total_seconds())
+        if best_delta is None or delta < best_delta:
+            best_delta = delta
+            best_item = item
+    return best_item
+
+
+def _metric_delta(current: Any, previous: Any) -> Optional[Dict[str, Any]]:
+    """Calcula variação absoluta e percentual entre duas métricas.
+
+    Argumentos:
+        current: Valor atual da métrica.
+        previous: Valor de referência temporal da métrica.
+
+    Retorno:
+        Dicionário `{current, previous, delta, delta_pct}` ou `None` se valores
+        não forem numéricos.
+    """
+
+    if current is None or previous is None:
+        return None
+    try:
+        current_num = float(current)
+        previous_num = float(previous)
+    except (TypeError, ValueError):
+        return None
+    delta = current_num - previous_num
+    delta_pct = (delta / previous_num * 100.0) if previous_num != 0 else None
+    return {
+        "current": current_num,
+        "previous": previous_num,
+        "delta": delta,
+        "delta_pct": delta_pct,
+    }
+
+
+def _compute_public_instagram_metrics(profile_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Calcula métricas derivadas a partir dos dados públicos do scraper.
+
+    A função reduz lacunas de análise estimando engagement e agregados de
+    interações com base nos posts recentes recolhidos (likes/comentários).
+
+    Argumentos:
+        profile_data: Dados de perfil já normalizados pelo coletor público.
+
+    Retorno:
+        Dicionário com campos derivados para enriquecer o input analítico.
+    """
+
+    followers = profile_data.get("followers_count")
+    posts = profile_data.get("recent_posts")
+    if not isinstance(posts, list) or not posts:
+        return {}
+
+    total_likes = 0.0
+    total_comments = 0.0
+    counted_posts = 0
+    for post in posts:
+        if not isinstance(post, dict):
+            continue
+        likes = post.get("likesCount")
+        comments = post.get("commentsCount")
+        likes_num = float(likes) if isinstance(likes, (int, float)) else 0.0
+        comments_num = float(comments) if isinstance(comments, (int, float)) else 0.0
+        total_likes += likes_num
+        total_comments += comments_num
+        counted_posts += 1
+    if counted_posts == 0:
+        return {}
+
+    avg_likes = total_likes / counted_posts
+    avg_comments = total_comments / counted_posts
+    engagement_rate = None
+    if isinstance(followers, (int, float)) and float(followers) > 0:
+        engagement_rate = ((avg_likes + avg_comments) / float(followers)) * 100.0
+
+    return {
+        "avg_interactions_per_post": {
+            "likes": round(avg_likes, 2),
+            "comments": round(avg_comments, 2),
+            "shares": None,
+            "saves": None,
+        },
+        "engagement_rate": round(engagement_rate, 4) if engagement_rate is not None else None,
+    }
+
+
+def _build_snapshot_comparisons(profile_username: str, current_snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    """Constrói comparações temporais 1 semana, 2 semanas e 1 mês.
+
+    A função consulta o histórico persistido do perfil, procura snapshots de
+    referência para os períodos pedidos e calcula evolução de followers,
+    following, posts e engagement.
+
+    Argumentos:
+        profile_username: Username do perfil analisado.
+        current_snapshot: Snapshot mais recente já recolhido.
+
+    Retorno:
+        Dicionário com chaves `one_week`, `two_weeks`, `one_month` contendo
+        variações por métrica e disponibilidade de dados históricos.
+    """
+
+    all_snapshots = _load_social_snapshots()
+    history = all_snapshots.get(profile_username.lower().strip(), [])
+    if not isinstance(history, list) or len(history) < 2:
+        return {
+            "one_week": {"available": False},
+            "two_weeks": {"available": False},
+            "one_month": {"available": False},
+        }
+
+    now_dt = datetime.now(timezone.utc)
+    targets = {
+        "one_week": now_dt - timedelta(days=7),
+        "two_weeks": now_dt - timedelta(days=14),
+        "one_month": now_dt - timedelta(days=30),
+    }
+    output: Dict[str, Any] = {}
+    for key, target_dt in targets.items():
+        reference = _pick_closest_snapshot(history[:-1], target_dt)
+        if not reference:
+            output[key] = {"available": False}
+            continue
+        output[key] = {
+            "available": True,
+            "reference_captured_at": reference.get("captured_at"),
+            "followers": _metric_delta(current_snapshot.get("followers_count"), reference.get("followers_count")),
+            "following": _metric_delta(current_snapshot.get("following_count"), reference.get("following_count")),
+            "posts": _metric_delta(current_snapshot.get("posts_count"), reference.get("posts_count")),
+            "engagement_rate": _metric_delta(
+                current_snapshot.get("engagement_rate"),
+                reference.get("engagement_rate"),
+            ),
+        }
+    return output
+
+
+def _extract_instagram_username(profile_input: str) -> Optional[str]:
+    """Extrai username de Instagram a partir de `@nome` ou URL pública.
+
+    A função normaliza o input recebido no frontend e tenta identificar um
+    username válido de perfil Instagram. Suporta formatos comuns:
+    `@username`, `username`, `https://instagram.com/username` e variantes com
+    `www`/barra final.
+
+    Argumentos:
+        profile_input: Texto livre introduzido pelo utilizador com username ou
+            link de perfil do Instagram.
+
+    Retorno:
+        Username limpo sem `@` quando o formato é válido; `None` quando não foi
+        possível extrair um identificador consistente.
+    """
+
+    raw = str(profile_input or "").strip()
+    if not raw:
+        return None
+
+    if raw.startswith("@"):
+        candidate = raw[1:].strip().strip("/")
+        return candidate if re.fullmatch(r"[A-Za-z0-9._]{1,30}", candidate) else None
+
+    if raw.startswith("http://") or raw.startswith("https://"):
+        parsed = urlparse(raw)
+        host = (parsed.netloc or "").lower()
+        if "instagram.com" not in host:
+            return None
+        path_parts = [part for part in parsed.path.split("/") if part.strip()]
+        if not path_parts:
+            return None
+        candidate = path_parts[0].strip()
+        if candidate.lower() in {"p", "reel", "stories", "explore"}:
+            return None
+        return candidate if re.fullmatch(r"[A-Za-z0-9._]{1,30}", candidate) else None
+
+    candidate = raw.strip().strip("/")
+    return candidate if re.fullmatch(r"[A-Za-z0-9._]{1,30}", candidate) else None
+
+
+def _parse_human_number(value: str) -> Optional[int]:
+    """Converte texto numérico humano para inteiro.
+
+    A função interpreta formatos frequentes em páginas públicas, incluindo:
+    separadores (`1,234`/`1.234`) e sufixos curtos (`1.2k`, `3,4m`).
+
+    Argumentos:
+        value: Texto com número potencialmente formatado.
+
+    Retorno:
+        Inteiro convertido quando possível; `None` em caso de formato inválido.
+    """
+
+    text = str(value or "").strip().lower()
+    if not text:
+        return None
+
+    multiplier = 1
+    if text.endswith("k"):
+        multiplier = 1_000
+        text = text[:-1]
+    elif text.endswith("m"):
+        multiplier = 1_000_000
+        text = text[:-1]
+
+    normalized = text.replace(" ", "")
+    if multiplier == 1:
+        normalized = normalized.replace(".", "").replace(",", "")
+        if not normalized.isdigit():
+            return None
+        return int(normalized)
+
+    normalized = normalized.replace(",", ".")
+    try:
+        base = float(normalized)
+    except ValueError:
+        return None
+    return int(base * multiplier)
+
+
+def _fetch_instagram_public_profile(username: str) -> Dict[str, Any]:
+    """Recolhe métricas públicas de perfil com Apify como fonte primária.
+
+    A função tenta primeiro obter dados através do `Apify Instagram Scraper`,
+    permitindo resultados mais estáveis para o modo de análise rápida do MVP.
+    Quando o Apify não está configurado ou falha temporariamente, faz fallback
+    automático para scraping web básico local.
+
+    Argumentos:
+        username: Nome público do perfil a consultar (sem `@`).
+
+    Retorno:
+        Dicionário estruturado com métricas básicas de perfil, método de recolha
+        e classificação de qualidade dos dados.
+
+    Raises:
+        RuntimeError: Quando não consegue recolher dados nem pelo Apify nem pelo
+            fallback web local.
+    """
+
+    return _fetch_instagram_public_profile_with_apify(username)
+
+
+def _fetch_instagram_public_profile_with_apify(username: str) -> Dict[str, Any]:
+    """Obtém métricas públicas via Apify Instagram Scraper.
+
+    A função executa o actor do Apify com URL direta do perfil e interpreta o
+    primeiro item do dataset devolvido para extrair métricas principais.
+
+    Variáveis de ambiente suportadas:
+        - `APIFY_API_TOKEN`: token obrigatório para autenticar no Apify.
+        - `APIFY_INSTAGRAM_SCRAPER_ACTOR`: actor id opcional. Por defeito usa
+          `apify/instagram-scraper`.
+
+    Argumentos:
+        username: Username Instagram sem `@`.
+
+    Retorno:
+        Dicionário com métricas de perfil e metadados da recolha via Apify.
+
+    Raises:
+        RuntimeError: Quando o token não existe, o actor falha ou devolve
+            payload sem itens utilizáveis.
+    """
+
+    apify_token = os.getenv("APIFY_API_TOKEN", "").strip()
+    actor_id = os.getenv("APIFY_INSTAGRAM_SCRAPER_ACTOR", "apify/instagram-scraper").strip()
+    if not apify_token:
+        raise RuntimeError("APIFY_API_TOKEN não configurado.")
+    if not actor_id:
+        raise RuntimeError("APIFY_INSTAGRAM_SCRAPER_ACTOR inválido.")
+
+    actor_path = actor_id.replace("/", "~")
+    apify_url = (
+        f"https://api.apify.com/v2/acts/{actor_path}/run-sync-get-dataset-items?token={apify_token}"
+    )
+    payload = {
+        "directUrls": [f"https://www.instagram.com/{username}/"],
+        "resultsType": "details",
+        "resultsLimit": 1,
+        "searchType": "user",
+    }
+    http_request = request.Request(
+        apify_url,
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        data=json.dumps(payload).encode("utf-8"),
+        method="POST",
+    )
+    try:
+        with request.urlopen(http_request, timeout=90) as response:
+            body = response.read().decode("utf-8", errors="replace")
+    except error.HTTPError as exc:
+        error_body = ""
+        try:
+            error_body = exc.read().decode("utf-8", errors="replace")
+        except Exception:  # noqa: BLE001
+            error_body = ""
+        raise RuntimeError(f"Apify HTTP {exc.code}: {error_body[:280] or 'sem detalhe'}") from exc
+    except error.URLError as exc:
+        raise RuntimeError(f"Falha de ligação ao Apify: {exc!s}") from exc
+    except (TimeoutError, OSError) as exc:
+        raise RuntimeError(f"Timeout/erro de sistema no Apify: {exc!s}") from exc
+
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Resposta inválida do Apify: {body[:240]}") from exc
+
+    items = data if isinstance(data, list) else []
+    if not items:
+        raise RuntimeError("Apify devolveu dataset vazio para este perfil.")
+    first = items[0]
+    if not isinstance(first, dict):
+        raise RuntimeError("Apify devolveu item inválido (não objeto).")
+
+    followers_count = first.get("followersCount")
+    following_count = first.get("followsCount")
+    posts_count = first.get("postsCount")
+    engagement_rate = first.get("engagementRate")
+    if followers_count is None:
+        followers_count = first.get("followers")
+    if following_count is None:
+        following_count = first.get("following")
+    if posts_count is None:
+        posts_count = first.get("posts")
+    if engagement_rate is None:
+        engagement_rate = first.get("engagement")
+
+    latest_posts_raw = first.get("latestPosts") or first.get("latestIgtvVideos") or []
+    recent_posts: List[Dict[str, Any]] = []
+    if isinstance(latest_posts_raw, list):
+        for post in latest_posts_raw[:12]:
+            if not isinstance(post, dict):
+                continue
+            recent_posts.append(
+                {
+                    "id": post.get("id"),
+                    "type": post.get("type") or post.get("shortCode"),
+                    "caption": post.get("caption"),
+                    "likesCount": post.get("likesCount"),
+                    "commentsCount": post.get("commentsCount"),
+                    "timestamp": post.get("timestamp"),
+                    "url": post.get("url"),
+                }
+            )
+
+    profile_name = (
+        str(first.get("username") or first.get("userName") or username).strip() or username
+    )
+    filled_fields = sum(
+        value is not None for value in [followers_count, following_count, posts_count]
+    )
+    data_quality = "baixa"
+    if filled_fields >= 3:
+        data_quality = "alta"
+    elif filled_fields == 2:
+        data_quality = "media"
+
+    result = {
+        "platform": "instagram",
+        "profile": profile_name,
+        "followers_count": followers_count,
+        "following_count": following_count,
+        "posts_count": posts_count,
+        "engagement_rate": engagement_rate,
+        "recent_posts": recent_posts,
+        "biography": first.get("biography"),
+        "category": first.get("businessCategoryName") or first.get("categoryName"),
+        "collection_method": f"apify:{actor_id}",
+        "data_quality": data_quality,
+    }
+    if result.get("engagement_rate") is None:
+        derived = _compute_public_instagram_metrics(result)
+        if derived.get("engagement_rate") is not None:
+            result["engagement_rate"] = derived["engagement_rate"]
+        if derived.get("avg_interactions_per_post"):
+            result["avg_interactions_per_post"] = derived["avg_interactions_per_post"]
+    return result
+
+
+def _fetch_instagram_public_profile_web(username: str) -> Dict[str, Any]:
+    """Recolhe métricas públicas básicas por leitura direta da página web.
+
+    Esta função é usada como fallback quando o Apify não está disponível. A
+    extração procura contagens no HTML e, em último caso, no campo
+    `og:description`.
+
+    Argumentos:
+        username: Nome público do perfil a consultar (sem `@`).
+
+    Retorno:
+        Dicionário com contagens básicas e metadados da recolha.
+
+    Raises:
+        RuntimeError: Quando não consegue aceder ao perfil público.
+    """
+
+    url = f"https://www.instagram.com/{username}/"
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "en-US,en;q=0.9,pt-PT;q=0.8",
+    }
+    http_request = request.Request(url, headers=headers, method="GET")
+
+    try:
+        with request.urlopen(http_request, timeout=25) as response:
+            html = response.read().decode("utf-8", errors="replace")
+    except error.HTTPError as exc:
+        if exc.code == 404:
+            raise RuntimeError("Perfil Instagram não encontrado (404).") from exc
+        raise RuntimeError(f"Instagram respondeu com HTTP {exc.code}.") from exc
+    except error.URLError as exc:
+        raise RuntimeError(f"Falha de ligação ao Instagram: {exc!s}") from exc
+    except (TimeoutError, OSError) as exc:
+        raise RuntimeError(f"Timeout/erro de sistema ao ler perfil Instagram: {exc!s}") from exc
+
+    followers_match = re.search(r'"edge_followed_by"\s*:\s*\{"count"\s*:\s*(\d+)\}', html)
+    following_match = re.search(r'"edge_follow"\s*:\s*\{"count"\s*:\s*(\d+)\}', html)
+    posts_match = re.search(r'"edge_owner_to_timeline_media"\s*:\s*\{"count"\s*:\s*(\d+)\}', html)
+
+    followers_count = int(followers_match.group(1)) if followers_match else None
+    following_count = int(following_match.group(1)) if following_match else None
+    posts_count = int(posts_match.group(1)) if posts_match else None
+
+    if followers_count is None or following_count is None or posts_count is None:
+        og_match = re.search(
+            r'<meta\s+property="og:description"\s+content="([^"]+)"',
+            html,
+            flags=re.IGNORECASE,
+        )
+        if og_match:
+            description = og_match.group(1)
+            parts = [part.strip() for part in description.split(",")]
+            if len(parts) >= 3:
+                parsed_followers = _parse_human_number(parts[0].split(" ")[0])
+                parsed_following = _parse_human_number(parts[1].split(" ")[0])
+                parsed_posts = _parse_human_number(parts[2].split(" ")[0])
+                followers_count = followers_count or parsed_followers
+                following_count = following_count or parsed_following
+                posts_count = posts_count or parsed_posts
+
+    filled_fields = sum(value is not None for value in [followers_count, following_count, posts_count])
+    data_quality = "baixa"
+    if filled_fields == 3:
+        data_quality = "media"
+    elif filled_fields >= 1:
+        data_quality = "baixa"
+
+    return {
+        "platform": "instagram",
+        "profile": username,
+        "followers_count": followers_count,
+        "following_count": following_count,
+        "posts_count": posts_count,
+        "collection_method": "public_web_profile",
+        "data_quality": data_quality,
     }
 
 
@@ -2245,6 +3620,203 @@ def agent_page(agent_slug: str) -> str:
                   sendMessage();
                 }
               });
+            </script>
+          </body>
+        </html>
+        """
+
+    if agent_slug == "redes-sociais":
+        return """
+        <!doctype html>
+        <html lang="pt">
+          <head>
+            <meta charset="UTF-8" />
+            <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+            <title>Agente Redes Sociais</title>
+            <style>
+              :root {
+                --bg: #0f172a;
+                --surface: #1e293b;
+                --line: rgba(255, 255, 255, 0.12);
+                --text: #e2e8f0;
+                --muted: #94a3b8;
+              }
+              body {
+                font-family: "Segoe UI", system-ui, sans-serif;
+                margin: 0;
+                background: radial-gradient(circle at 12% 12%, #24344f 0%, #0f172a 62%);
+                color: var(--text);
+                padding: 24px 16px;
+              }
+              .wrap { max-width: 760px; margin: 0 auto; }
+              .card {
+                background: var(--surface);
+                border: 1px solid var(--line);
+                border-radius: 14px;
+                padding: 20px;
+              }
+              .title { margin: 0; font-size: 1.4rem; }
+              .subtitle { margin: 6px 0 0; color: var(--muted); font-size: 0.92rem; }
+              .input-group { margin-top: 16px; display: grid; gap: 10px; }
+              input {
+                width: 100%;
+                box-sizing: border-box;
+                border-radius: 10px;
+                border: 1px solid var(--line);
+                background: #0b1220;
+                color: var(--text);
+                padding: 10px 12px;
+                font-family: inherit;
+              }
+              .actions { margin-top: 10px; display: flex; gap: 10px; }
+              button {
+                border: none;
+                border-radius: 9px;
+                padding: 10px 14px;
+                color: #fff;
+                font-weight: 600;
+                cursor: pointer;
+              }
+              .analyze-btn { background: linear-gradient(180deg, #10b981, #059669); }
+              .result {
+                margin-top: 16px;
+                border: 1px solid var(--line);
+                border-radius: 12px;
+                background: #0f172a;
+                padding: 14px;
+              }
+              .result h3 { margin-bottom: 8px; color: #93c5fd; }
+              .result h4 { margin-bottom: 8px; color: #c4b5fd; }
+              .hint { color: var(--muted); font-size: 0.84rem; margin-top: 8px; }
+              .meta { color: var(--muted); font-size: 0.82rem; margin-bottom: 8px; }
+              a { color: #93c5fd; text-decoration: none; }
+            </style>
+          </head>
+          <body>
+            <div class="wrap">
+              <p><a href="/">← Voltar ao Diretor</a></p>
+              <div class="card">
+                <h1 class="title">Agente Redes Sociais · Instagram (MVP)</h1>
+                <p class="subtitle">Insere o perfil e clica em analisar. Se fizeres login Instagram, a análise fica mais completa.</p>
+                <div class="input-group">
+                  <input id="profileInput" placeholder="Username ou link do Instagram (ex.: @nome ou https://instagram.com/nome)" />
+                </div>
+                <div class="actions">
+                  <button type="button" class="analyze-btn" onclick="startInstagramLogin()">Login Instagram</button>
+                  <button type="button" class="analyze-btn" onclick="runInstagramAnalysis()">Analisar</button>
+                </div>
+                <p id="authStatus" class="hint">Estado login: a verificar...</p>
+                <p class="hint">Resultado: insights, problemas, oportunidades, ações prioritárias, ideias de conteúdo e plano de crescimento.</p>
+                <div id="result" class="result"></div>
+              </div>
+            </div>
+            <script>
+              const profileInput = document.getElementById("profileInput");
+              const result = document.getElementById("result");
+              const authStatus = document.getElementById("authStatus");
+
+              function renderList(items) {
+                if (!Array.isArray(items) || !items.length) return "<li>Sem dados suficientes.</li>";
+                return items.map(item => `<li>${item}</li>`).join("");
+              }
+
+              function renderMetrics(obj) {
+                if (!obj || typeof obj !== "object" || Array.isArray(obj)) {
+                  return "<li>Sem dados.</li>";
+                }
+                const entries = Object.entries(obj);
+                if (!entries.length) return "<li>Sem dados.</li>";
+                return entries.map(([key, value]) => `<li><strong>${key}:</strong> ${String(value)}</li>`).join("");
+              }
+
+              function renderComparisonBlock(label, obj) {
+                if (!obj || !obj.available) {
+                  return `<li><strong>${label}:</strong> sem histórico suficiente.</li>`;
+                }
+                const followersDelta = obj.followers && obj.followers.delta !== null ? obj.followers.delta : "n/d";
+                const engagementDelta = obj.engagement_rate && obj.engagement_rate.delta !== null ? obj.engagement_rate.delta : "n/d";
+                const postsDelta = obj.posts && obj.posts.delta !== null ? obj.posts.delta : "n/d";
+                return `<li><strong>${label}:</strong> followers Δ ${followersDelta}, engagement Δ ${engagementDelta}, posts Δ ${postsDelta}</li>`;
+              }
+
+              function startInstagramLogin() {
+                window.location.href = "/agents/social-media/auth/start";
+              }
+
+              async function refreshAuthStatus() {
+                try {
+                  const response = await fetch("/agents/social-media/auth/status");
+                  const data = await response.json();
+                  if (!response.ok) {
+                    authStatus.textContent = "Estado login: erro ao validar autenticação.";
+                    return;
+                  }
+                  if (data.connected) {
+                    const username = data.username ? `@${data.username}` : "conta autenticada";
+                    authStatus.textContent = `Estado login: ligado (${username}).`;
+                    return;
+                  }
+                  if (data.last_error) {
+                    authStatus.textContent = `Estado login: não ligado (${data.last_error}).`;
+                  } else {
+                    authStatus.textContent = "Estado login: não ligado.";
+                  }
+                } catch (err) {
+                  authStatus.textContent = "Estado login: indisponível no momento.";
+                }
+              }
+
+              async function runInstagramAnalysis() {
+                const profileValue = profileInput.value.trim();
+                try {
+                  if (!profileValue) {
+                    result.innerHTML = "<p><strong>Erro:</strong> Preenche o username/link do perfil.</p>";
+                    return;
+                  }
+                  result.innerHTML = "<p>A processar análise de Instagram...</p>";
+                  const payload = {
+                    profile_input: profileValue,
+                    instagram_data: {},
+                    language: "pt-PT"
+                  };
+
+                  const response = await fetch("/agents/social-media/analyze", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(payload)
+                  });
+                  const data = await response.json();
+                  if (!response.ok) {
+                    const detailText = data.detail || JSON.stringify(data);
+                    result.innerHTML = `<p><strong>Erro:</strong> ${detailText}</p>`;
+                    return;
+                  }
+
+                  result.innerHTML = `
+                    <h3>Análise Instagram</h3>
+                    <p class="meta">Perfil: @${data.profile_username || "n/d"} · Confiança: ${data.confianca_analise || "baixa"}</p>
+                    <h4>Principais Insights</h4><ol>${renderList(data.principais_insights)}</ol>
+                    <h4>Problemas Identificados</h4><ol>${renderList(data.problemas_identificados)}</ol>
+                    <h4>Oportunidades</h4><ol>${renderList(data.oportunidades)}</ol>
+                    <h4>Ações Prioritárias</h4><ol>${renderList(data.acoes_prioritarias)}</ol>
+                    <h4>Ideias de Conteúdo</h4><ol>${renderList(data.ideias_conteudo)}</ol>
+                    <h4>Plano de Crescimento (curto prazo)</h4><ol>${renderList(data.plano_crescimento_curto_prazo)}</ol>
+                    <h4>Métricas Universais</h4><ul>${renderMetrics(data.metricas_universais)}</ul>
+                    <h4>Métricas Específicas Instagram</h4><ul>${renderMetrics(data.metricas_instagram)}</ul>
+                    <h4>Comparação Temporal</h4>
+                    <ul>
+                      ${renderComparisonBlock("1 semana", (data.comparisons || {}).one_week)}
+                      ${renderComparisonBlock("2 semanas", (data.comparisons || {}).two_weeks)}
+                      ${renderComparisonBlock("1 mês", (data.comparisons || {}).one_month)}
+                    </ul>
+                    <h4>Lacunas de Dados</h4><ol>${renderList(data.lacunas_de_dados)}</ol>
+                  `;
+                } catch (err) {
+                  const errorMessage = err instanceof Error ? err.message : String(err);
+                  result.innerHTML = `<p><strong>Erro:</strong> ${errorMessage}</p>`;
+                }
+              }
+              refreshAuthStatus();
             </script>
           </body>
         </html>
