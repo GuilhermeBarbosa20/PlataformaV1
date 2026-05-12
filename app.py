@@ -2890,22 +2890,96 @@ def _fetch_instagram_public_profile(username: str) -> Dict[str, Any]:
 
     A função tenta primeiro obter dados através do `Apify Instagram Scraper`,
     permitindo resultados mais estáveis para o modo de análise rápida do MVP.
-    Quando o Apify não está configurado ou falha temporariamente, faz fallback
-    automático para scraping web básico local.
+    Quando o Apify não está configurado (sem `APIFY_API_TOKEN`) ou falha
+    temporariamente, faz fallback automático para scraping web básico local
+    (`_fetch_instagram_public_profile_web`). Assim, o utilizador consegue
+    analisar perfis mesmo sem configurar Apify.
 
     Argumentos:
         username: Nome público do perfil a consultar (sem `@`).
 
     Retorno:
         Dicionário estruturado com métricas básicas de perfil, método de recolha
-        e classificação de qualidade dos dados.
+        e classificação de qualidade dos dados. O campo `collection_method`
+        identifica a origem efectiva (`apify:<actor>` ou `public_web_profile`).
+        Quando o Apify falha mas o fallback funciona, é incluído também o
+        campo `apify_error` com a razão do salto, para diagnóstico.
 
     Raises:
         RuntimeError: Quando não consegue recolher dados nem pelo Apify nem pelo
             fallback web local.
     """
 
-    return _fetch_instagram_public_profile_with_apify(username)
+    apify_token = os.getenv("APIFY_API_TOKEN", "").strip()
+    apify_error: Optional[str] = None
+    result: Dict[str, Any]
+
+    if apify_token:
+        try:
+            result = _fetch_instagram_public_profile_with_apify(username)
+        except RuntimeError as exc:
+            apify_error = str(exc)
+            try:
+                result = _fetch_instagram_public_profile_web(username)
+            except RuntimeError as web_exc:
+                raise RuntimeError(
+                    f"Não foi possível recolher dados do perfil. Apify: {apify_error}. Web: {web_exc}"
+                ) from web_exc
+            result["apify_error"] = apify_error
+    else:
+        try:
+            result = _fetch_instagram_public_profile_web(username)
+        except RuntimeError as exc:
+            raise RuntimeError(
+                f"Não foi possível recolher dados do perfil (sem APIFY_API_TOKEN). Web: {exc}"
+            ) from exc
+        result["apify_error"] = "APIFY_API_TOKEN não configurado; a usar fallback web."
+
+    if apify_token:
+        enrichment_errors: List[str] = []
+        posts_extra: List[Dict[str, Any]] = []
+        reels_extra: List[Dict[str, Any]] = []
+
+        try:
+            posts_extra = _fetch_instagram_posts_with_apify(username)
+        except RuntimeError as exc:
+            enrichment_errors.append(f"post_scraper: {exc}")
+
+        try:
+            reels_extra = _fetch_instagram_reels_with_apify(username)
+        except RuntimeError as exc:
+            enrichment_errors.append(f"reel_scraper: {exc}")
+
+        if posts_extra:
+            result["recent_posts_extended"] = posts_extra
+            if not result.get("recent_posts"):
+                result["recent_posts"] = [
+                    {
+                        "id": p.get("id"),
+                        "type": p.get("type"),
+                        "caption": p.get("caption"),
+                        "likesCount": p.get("likesCount"),
+                        "commentsCount": p.get("commentsCount"),
+                        "timestamp": p.get("timestamp"),
+                        "url": p.get("url"),
+                    }
+                    for p in posts_extra[:12]
+                ]
+        if reels_extra:
+            result["recent_reels"] = reels_extra
+
+        enrichment = _build_apify_enriched_metrics(
+            followers_count=result.get("followers_count"),
+            posts=posts_extra,
+            reels=reels_extra,
+        )
+        if enrichment:
+            result["apify_enrichment"] = enrichment
+
+        if enrichment_errors:
+            result["apify_enrichment_errors"] = enrichment_errors
+
+    return result
 
 
 def _fetch_instagram_public_profile_with_apify(username: str) -> Dict[str, Any]:
@@ -3043,6 +3117,391 @@ def _fetch_instagram_public_profile_with_apify(username: str) -> Dict[str, Any]:
         if derived.get("avg_interactions_per_post"):
             result["avg_interactions_per_post"] = derived["avg_interactions_per_post"]
     return result
+
+
+def _run_apify_actor_sync(actor_id: str, payload: Dict[str, Any], timeout: int = 120) -> List[Any]:
+    """Executa um actor do Apify em modo síncrono e devolve o dataset.
+
+    A função abstrai a chamada HTTP ao endpoint
+    `run-sync-get-dataset-items` da Apify, reutilizável por vários actors
+    (perfil, posts, reels, etc.).
+
+    Argumentos:
+        actor_id: Identificador do actor Apify no formato `user/actor`.
+        payload: Dicionário com o input JSON específico do actor.
+        timeout: Tempo máximo, em segundos, para esperar pela resposta.
+
+    Retorno:
+        Lista de itens do dataset (objetos `dict`). Lista vazia se a
+        resposta não devolver itens.
+
+    Raises:
+        RuntimeError: Quando o token está em falta, o actor falha, há
+            problemas de rede ou o JSON é inválido.
+    """
+
+    apify_token = os.getenv("APIFY_API_TOKEN", "").strip()
+    if not apify_token:
+        raise RuntimeError("APIFY_API_TOKEN não configurado.")
+    if not actor_id:
+        raise RuntimeError("Apify actor id inválido.")
+
+    actor_path = actor_id.replace("/", "~")
+    apify_url = (
+        f"https://api.apify.com/v2/acts/{actor_path}/run-sync-get-dataset-items?token={apify_token}"
+    )
+    http_request = request.Request(
+        apify_url,
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        data=json.dumps(payload).encode("utf-8"),
+        method="POST",
+    )
+    try:
+        with request.urlopen(http_request, timeout=timeout) as response:
+            body = response.read().decode("utf-8", errors="replace")
+    except error.HTTPError as exc:
+        error_body = ""
+        try:
+            error_body = exc.read().decode("utf-8", errors="replace")
+        except Exception:  # noqa: BLE001
+            error_body = ""
+        raise RuntimeError(
+            f"Apify ({actor_id}) HTTP {exc.code}: {error_body[:280] or 'sem detalhe'}"
+        ) from exc
+    except error.URLError as exc:
+        raise RuntimeError(f"Falha de ligação ao Apify ({actor_id}): {exc!s}") from exc
+    except (TimeoutError, OSError) as exc:
+        raise RuntimeError(f"Timeout/erro de sistema no Apify ({actor_id}): {exc!s}") from exc
+
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Resposta inválida do Apify ({actor_id}): {body[:240]}") from exc
+
+    return data if isinstance(data, list) else []
+
+
+def _fetch_instagram_posts_with_apify(username: str, results_limit: int = 30) -> List[Dict[str, Any]]:
+    """Recolhe posts públicos recentes do Instagram via Apify Post Scraper.
+
+    A função executa um actor Apify orientado a posts (`apify/instagram-post-scraper`
+    por defeito) e devolve uma lista normalizada de posts recentes com
+    métricas de engagement públicas.
+
+    Variáveis de ambiente suportadas:
+        - `APIFY_API_TOKEN`: token de autenticação.
+        - `APIFY_INSTAGRAM_POST_SCRAPER_ACTOR`: actor id opcional. Por
+          defeito `apify/instagram-post-scraper`.
+
+    Argumentos:
+        username: Username Instagram sem `@`.
+        results_limit: Número máximo de posts a recolher (default 30).
+
+    Retorno:
+        Lista de dicionários com os campos: `id`, `type`, `caption`,
+        `likesCount`, `commentsCount`, `videoPlayCount`, `videoViewCount`,
+        `timestamp`, `url`, `hashtags`, `mentions`. Lista vazia se o actor
+        não devolver posts.
+
+    Raises:
+        RuntimeError: Quando o actor falha ou devolve payload inválido.
+    """
+
+    actor_id = os.getenv(
+        "APIFY_INSTAGRAM_POST_SCRAPER_ACTOR", "apify/instagram-post-scraper"
+    ).strip()
+    payload = {
+        "username": [username],
+        "resultsLimit": max(1, min(int(results_limit or 30), 100)),
+    }
+    items = _run_apify_actor_sync(actor_id, payload, timeout=120)
+    posts: List[Dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        posts.append(
+            {
+                "id": item.get("id") or item.get("shortCode"),
+                "type": item.get("type") or item.get("productType"),
+                "caption": item.get("caption"),
+                "likesCount": item.get("likesCount"),
+                "commentsCount": item.get("commentsCount"),
+                "videoPlayCount": item.get("videoPlayCount"),
+                "videoViewCount": item.get("videoViewCount"),
+                "timestamp": item.get("timestamp"),
+                "url": item.get("url"),
+                "hashtags": item.get("hashtags"),
+                "mentions": item.get("mentions"),
+            }
+        )
+    return posts
+
+
+def _fetch_instagram_reels_with_apify(username: str, results_limit: int = 20) -> List[Dict[str, Any]]:
+    """Recolhe reels públicos recentes do Instagram via Apify Reel Scraper.
+
+    A função executa um actor Apify orientado a reels
+    (`apify/instagram-reel-scraper` por defeito) e devolve uma lista
+    normalizada com métricas públicas relevantes (playCount, likes,
+    comentários, duração).
+
+    Variáveis de ambiente suportadas:
+        - `APIFY_API_TOKEN`: token de autenticação.
+        - `APIFY_INSTAGRAM_REEL_SCRAPER_ACTOR`: actor id opcional. Por
+          defeito `apify/instagram-reel-scraper`.
+
+    Argumentos:
+        username: Username Instagram sem `@`.
+        results_limit: Número máximo de reels a recolher (default 20).
+
+    Retorno:
+        Lista de dicionários com os campos: `id`, `caption`, `likesCount`,
+        `commentsCount`, `videoPlayCount`, `videoViewCount`,
+        `videoDuration`, `timestamp`, `url`. Lista vazia se o actor não
+        devolver reels.
+
+    Raises:
+        RuntimeError: Quando o actor falha ou devolve payload inválido.
+    """
+
+    actor_id = os.getenv(
+        "APIFY_INSTAGRAM_REEL_SCRAPER_ACTOR", "apify/instagram-reel-scraper"
+    ).strip()
+    payload = {
+        "username": [username],
+        "resultsLimit": max(1, min(int(results_limit or 20), 100)),
+    }
+    items = _run_apify_actor_sync(actor_id, payload, timeout=120)
+    reels: List[Dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        reels.append(
+            {
+                "id": item.get("id") or item.get("shortCode"),
+                "caption": item.get("caption"),
+                "likesCount": item.get("likesCount"),
+                "commentsCount": item.get("commentsCount"),
+                "videoPlayCount": item.get("videoPlayCount") or item.get("playCount"),
+                "videoViewCount": item.get("videoViewCount") or item.get("viewCount"),
+                "videoDuration": item.get("videoDuration") or item.get("duration"),
+                "timestamp": item.get("timestamp"),
+                "url": item.get("url"),
+            }
+        )
+    return reels
+
+
+def _classify_post_format(post: Dict[str, Any]) -> str:
+    """Classifica um post Instagram num dos formatos universais.
+
+    A função normaliza vários valores de `type` que o Apify devolve
+    (`Image`, `Sidecar`, `Video`, `Reel`, etc.) num pequeno conjunto
+    fixo de categorias, útil para análise de distribuição.
+
+    Argumentos:
+        post: Dicionário de post recolhido pelo Apify.
+
+    Retorno:
+        Uma das strings: `reel`, `video`, `carousel`, `image` ou
+        `desconhecido`.
+    """
+
+    raw_type = str(post.get("type") or "").strip().lower()
+    if "reel" in raw_type or "clip" in raw_type:
+        return "reel"
+    if "sidecar" in raw_type or "carousel" in raw_type:
+        return "carousel"
+    if "video" in raw_type or "igtv" in raw_type:
+        return "video"
+    if "image" in raw_type or "photo" in raw_type:
+        return "image"
+    if post.get("videoPlayCount") is not None or post.get("videoViewCount") is not None:
+        return "video"
+    return "desconhecido"
+
+
+def _safe_float(value: Any) -> Optional[float]:
+    """Converte um valor arbitrário para `float` quando possível.
+
+    Argumentos:
+        value: Qualquer valor potencialmente numérico.
+
+    Retorno:
+        `float` se a conversão for bem sucedida; `None` caso contrário.
+    """
+
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _build_apify_enriched_metrics(
+    followers_count: Optional[Any],
+    posts: List[Dict[str, Any]],
+    reels: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Agrega métricas derivadas de posts e reels recolhidos pelo Apify.
+
+    A função calcula, **sem precisar de login Instagram**, métricas úteis
+    para o agente de IA:
+
+    - Distribuição por formato (reel/carrossel/imagem/vídeo).
+    - Top posts e top reels por likes/comentários/playCount.
+    - Cadência de publicação (média de dias entre posts e total de posts
+      nos últimos 30 dias).
+    - PlayCount médio e mediano dos Reels.
+    - Hashtags mais frequentes.
+
+    Argumentos:
+        followers_count: Número de seguidores (para engagement por post).
+        posts: Lista normalizada de posts pelo Apify Post Scraper.
+        reels: Lista normalizada de reels pelo Apify Reel Scraper.
+
+    Retorno:
+        Dicionário com chaves `format_distribution`, `top_posts`,
+        `top_reels`, `posting_cadence`, `reels_playcount_stats` e
+        `top_hashtags`. Devolve dicionário vazio quando não há dados
+        suficientes.
+    """
+
+    if not posts and not reels:
+        return {}
+
+    all_items: List[Dict[str, Any]] = []
+    for item in posts:
+        if isinstance(item, dict):
+            all_items.append(item)
+    for item in reels:
+        if isinstance(item, dict):
+            entry = dict(item)
+            entry["type"] = entry.get("type") or "Reel"
+            all_items.append(entry)
+
+    format_counter: Dict[str, int] = {}
+    format_engagement: Dict[str, List[float]] = {}
+    timestamps: List[datetime] = []
+    hashtag_counter: Dict[str, int] = {}
+
+    followers_num = _safe_float(followers_count)
+
+    for item in all_items:
+        fmt = _classify_post_format(item)
+        format_counter[fmt] = format_counter.get(fmt, 0) + 1
+
+        likes = _safe_float(item.get("likesCount")) or 0.0
+        comments = _safe_float(item.get("commentsCount")) or 0.0
+        interactions = likes + comments
+        if followers_num and followers_num > 0:
+            er = (interactions / followers_num) * 100.0
+        else:
+            er = interactions
+        format_engagement.setdefault(fmt, []).append(er)
+
+        ts_raw = item.get("timestamp")
+        if isinstance(ts_raw, str) and ts_raw.strip():
+            try:
+                timestamps.append(
+                    datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
+                )
+            except ValueError:
+                pass
+
+        hashtags = item.get("hashtags")
+        if isinstance(hashtags, list):
+            for tag in hashtags:
+                tag_str = str(tag).strip().lstrip("#").lower()
+                if tag_str:
+                    hashtag_counter[tag_str] = hashtag_counter.get(tag_str, 0) + 1
+
+    total_items = sum(format_counter.values()) or 1
+    format_distribution = {
+        fmt: {
+            "count": count,
+            "share_pct": round(count / total_items * 100.0, 2),
+            "avg_engagement_pct": round(
+                sum(format_engagement.get(fmt, [])) / len(format_engagement.get(fmt, [])),
+                4,
+            )
+            if format_engagement.get(fmt)
+            else None,
+        }
+        for fmt, count in format_counter.items()
+    }
+
+    def _top_n(items: List[Dict[str, Any]], key: str, limit: int = 3) -> List[Dict[str, Any]]:
+        scored = [
+            (item, _safe_float(item.get(key)) or 0.0)
+            for item in items
+            if isinstance(item, dict)
+        ]
+        scored.sort(key=lambda pair: pair[1], reverse=True)
+        return [
+            {
+                "url": item.get("url"),
+                "type": item.get("type"),
+                "likes": item.get("likesCount"),
+                "comments": item.get("commentsCount"),
+                "playCount": item.get("videoPlayCount") or item.get("videoViewCount"),
+                "timestamp": item.get("timestamp"),
+            }
+            for item, _ in scored[:limit]
+            if item.get("url") or item.get("id")
+        ]
+
+    top_posts = _top_n(posts, "likesCount", 3)
+    top_reels = _top_n(reels, "videoPlayCount", 3)
+
+    posting_cadence: Dict[str, Any] = {}
+    if timestamps:
+        timestamps_sorted = sorted(timestamps)
+        if len(timestamps_sorted) >= 2:
+            deltas = [
+                (timestamps_sorted[i] - timestamps_sorted[i - 1]).total_seconds() / 86400.0
+                for i in range(1, len(timestamps_sorted))
+            ]
+            avg_gap_days = sum(deltas) / len(deltas)
+            posting_cadence["avg_days_between_posts"] = round(avg_gap_days, 2)
+        now_dt = datetime.now(timezone.utc)
+        posts_last_30 = sum(1 for ts in timestamps_sorted if (now_dt - ts).days <= 30)
+        posting_cadence["posts_last_30_days"] = posts_last_30
+        posting_cadence["last_post_at"] = timestamps_sorted[-1].isoformat()
+
+    reels_playcounts = [
+        _safe_float(reel.get("videoPlayCount") or reel.get("videoViewCount"))
+        for reel in reels
+        if isinstance(reel, dict)
+    ]
+    reels_playcounts = [v for v in reels_playcounts if v is not None]
+    reels_stats: Dict[str, Any] = {}
+    if reels_playcounts:
+        reels_playcounts_sorted = sorted(reels_playcounts)
+        mid = len(reels_playcounts_sorted) // 2
+        if len(reels_playcounts_sorted) % 2 == 1:
+            median = reels_playcounts_sorted[mid]
+        else:
+            median = (reels_playcounts_sorted[mid - 1] + reels_playcounts_sorted[mid]) / 2.0
+        reels_stats = {
+            "count": len(reels_playcounts_sorted),
+            "avg_play_count": round(sum(reels_playcounts_sorted) / len(reels_playcounts_sorted), 2),
+            "median_play_count": round(median, 2),
+            "max_play_count": max(reels_playcounts_sorted),
+        }
+
+    top_hashtags = sorted(hashtag_counter.items(), key=lambda pair: pair[1], reverse=True)[:10]
+    top_hashtags_list = [{"tag": tag, "count": count} for tag, count in top_hashtags]
+
+    return {
+        "format_distribution": format_distribution,
+        "top_posts": top_posts,
+        "top_reels": top_reels,
+        "posting_cadence": posting_cadence,
+        "reels_playcount_stats": reels_stats,
+        "top_hashtags": top_hashtags_list,
+    }
 
 
 def _fetch_instagram_public_profile_web(username: str) -> Dict[str, Any]:
@@ -3633,110 +4092,647 @@ def agent_page(agent_slug: str) -> str:
             <meta charset="UTF-8" />
             <meta name="viewport" content="width=device-width, initial-scale=1.0" />
             <title>Agente Redes Sociais</title>
+            <link rel="preconnect" href="https://fonts.googleapis.com">
+            <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+            <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
             <style>
               :root {
-                --bg: #0f172a;
-                --surface: #1e293b;
-                --line: rgba(255, 255, 255, 0.12);
-                --text: #e2e8f0;
-                --muted: #94a3b8;
+                --bg-0: #08090d;
+                --bg-1: #0f1117;
+                --bg-2: #151823;
+                --surface: #1a1d2a;
+                --surface-2: #20243a;
+                --line: rgba(255,255,255,0.08);
+                --line-strong: rgba(255,255,255,0.16);
+                --text: #f4f6fb;
+                --muted: #8a90a6;
+                --muted-soft: #b3b8c9;
+                --primary: #ff3d7f;
+                --primary-2: #ff6a00;
+                --accent: #38bdf8;
+                --accent-2: #818cf8;
+                --good: #34d399;
+                --bad: #f87171;
+                --warn: #fbbf24;
+                --shadow: 0 20px 60px rgba(0,0,0,0.45);
               }
+              * { box-sizing: border-box; }
+              html, body { height: 100%; }
               body {
-                font-family: "Segoe UI", system-ui, sans-serif;
                 margin: 0;
-                background: radial-gradient(circle at 12% 12%, #24344f 0%, #0f172a 62%);
+                font-family: "Inter", "Segoe UI", system-ui, sans-serif;
+                background:
+                  radial-gradient(1200px 800px at 85% -10%, rgba(255,61,127,0.16), transparent 60%),
+                  radial-gradient(1000px 700px at -10% 110%, rgba(56,189,248,0.12), transparent 60%),
+                  var(--bg-0);
                 color: var(--text);
-                padding: 24px 16px;
+                -webkit-font-smoothing: antialiased;
+                font-feature-settings: "ss01" on, "cv11" on;
+                padding: 28px 18px 64px;
               }
-              .wrap { max-width: 760px; margin: 0 auto; }
-              .card {
-                background: var(--surface);
+              .wrap { max-width: 1180px; margin: 0 auto; }
+              .nav {
+                display: flex; align-items: center; justify-content: space-between;
+                margin-bottom: 16px;
+              }
+              .nav a.back {
+                color: var(--muted-soft); text-decoration: none; font-weight: 500;
+                font-size: 0.92rem; display: inline-flex; gap: 6px; align-items: center;
+                padding: 6px 10px; border-radius: 8px; border: 1px solid var(--line);
+                background: rgba(255,255,255,0.02);
+              }
+              .nav a.back:hover { color: #fff; border-color: var(--line-strong); }
+              .brand {
+                display: flex; align-items: center; gap: 10px;
+                font-weight: 700; color: var(--muted-soft); font-size: 0.92rem;
+              }
+              .brand .logo-dot {
+                width: 10px; height: 10px; border-radius: 50%;
+                background: linear-gradient(135deg, var(--primary), var(--primary-2));
+                box-shadow: 0 0 12px rgba(255,61,127,0.6);
+              }
+
+              /* Hero */
+              .hero {
+                background: linear-gradient(180deg, var(--surface) 0%, var(--bg-1) 100%);
+                border: 1px solid var(--line);
+                border-radius: 20px;
+                padding: 22px 22px 18px;
+                box-shadow: var(--shadow);
+                position: relative;
+                overflow: hidden;
+              }
+              .hero::before {
+                content: ""; position: absolute; inset: -1px;
+                background: linear-gradient(135deg, rgba(255,61,127,0.25), transparent 35%, rgba(56,189,248,0.18) 70%, transparent 100%);
+                opacity: 0.6; pointer-events: none; border-radius: 20px;
+                mask: linear-gradient(#000, transparent 60%);
+                -webkit-mask: linear-gradient(#000, transparent 60%);
+              }
+              .hero-top { display: flex; align-items: center; gap: 14px; }
+              .hero-icon {
+                width: 44px; height: 44px; border-radius: 12px;
+                background: linear-gradient(135deg, var(--primary), var(--primary-2));
+                display: flex; align-items: center; justify-content: center;
+                color: #fff; font-weight: 800; box-shadow: 0 6px 24px rgba(255,61,127,0.4);
+                font-size: 1.05rem;
+              }
+              .title { margin: 0; font-size: 1.45rem; letter-spacing: -0.01em; }
+              .subtitle { margin: 4px 0 0; color: var(--muted); font-size: 0.92rem; }
+
+              .form { margin-top: 18px; display: grid; grid-template-columns: 1fr auto auto; gap: 10px; }
+              .input-wrap {
+                position: relative;
+              }
+              .input-wrap::before {
+                content: "@"; position: absolute; left: 14px; top: 50%; transform: translateY(-50%);
+                color: var(--muted); font-weight: 600;
+              }
+              input.profile {
+                width: 100%;
+                border-radius: 12px;
+                border: 1px solid var(--line);
+                background: rgba(8,9,13,0.6);
+                color: var(--text);
+                padding: 12px 14px 12px 30px;
+                font-family: inherit; font-size: 0.95rem;
+                outline: none; transition: border-color 0.15s, box-shadow 0.15s;
+              }
+              input.profile:focus { border-color: rgba(255,61,127,0.6); box-shadow: 0 0 0 4px rgba(255,61,127,0.12); }
+              button {
+                border: none; border-radius: 12px; padding: 11px 16px;
+                color: #fff; font-weight: 600; cursor: pointer; font-family: inherit;
+                font-size: 0.93rem; letter-spacing: 0.01em; transition: transform 0.05s, filter 0.15s;
+              }
+              button:hover { filter: brightness(1.06); }
+              button:active { transform: translateY(1px); }
+              .btn-login { background: rgba(255,255,255,0.06); border: 1px solid var(--line-strong); }
+              .btn-analyze {
+                background: linear-gradient(135deg, var(--primary), var(--primary-2));
+                box-shadow: 0 8px 22px rgba(255,61,127,0.35);
+              }
+              .auth-row {
+                display: flex; align-items: center; justify-content: space-between;
+                margin-top: 12px; color: var(--muted); font-size: 0.83rem;
+              }
+              .badge {
+                display: inline-flex; align-items: center; gap: 6px;
+                padding: 4px 10px; border-radius: 999px;
+                font-size: 0.78rem; font-weight: 600; border: 1px solid var(--line);
+                background: rgba(255,255,255,0.03); color: var(--muted-soft);
+              }
+              .badge.ok { color: var(--good); border-color: rgba(52,211,153,0.35); background: rgba(52,211,153,0.08); }
+              .badge.warn { color: var(--warn); border-color: rgba(251,191,36,0.35); background: rgba(251,191,36,0.08); }
+              .badge.bad { color: var(--bad); border-color: rgba(248,113,113,0.35); background: rgba(248,113,113,0.08); }
+              .badge.info { color: var(--accent); border-color: rgba(56,189,248,0.35); background: rgba(56,189,248,0.08); }
+              .badge .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+
+              /* Results */
+              .results { margin-top: 18px; display: grid; gap: 16px; }
+              .empty {
+                border: 1px dashed var(--line-strong); border-radius: 16px;
+                padding: 28px; text-align: center; color: var(--muted);
+                background: rgba(255,255,255,0.02);
+              }
+              .empty .big { font-size: 1.05rem; color: var(--muted-soft); margin-bottom: 4px; }
+
+              .loading {
+                display: flex; align-items: center; gap: 12px;
+                background: var(--surface); border: 1px solid var(--line);
+                border-radius: 16px; padding: 18px 22px; color: var(--muted-soft);
+              }
+              .spinner {
+                width: 22px; height: 22px; border-radius: 50%;
+                border: 3px solid rgba(255,255,255,0.12);
+                border-top-color: var(--primary);
+                animation: spin 0.8s linear infinite;
+              }
+              @keyframes spin { to { transform: rotate(360deg); } }
+
+              /* Header da análise */
+              .analysis-header {
+                background: var(--surface); border: 1px solid var(--line);
+                border-radius: 16px; padding: 18px 20px; display: flex; gap: 16px;
+                align-items: center; justify-content: space-between; flex-wrap: wrap;
+              }
+              .analysis-header .who {
+                display: flex; align-items: center; gap: 14px;
+              }
+              .ig-avatar {
+                width: 56px; height: 56px; border-radius: 50%;
+                background: linear-gradient(135deg, #ffd76a, #ff3d7f 35%, #a855f7 70%, #38bdf8);
+                display: flex; align-items: center; justify-content: center;
+                color: #fff; font-weight: 800; font-size: 1.4rem;
+                box-shadow: 0 8px 22px rgba(168,85,247,0.25);
+              }
+              .analysis-header h2 { margin: 0; font-size: 1.18rem; letter-spacing: -0.01em; }
+              .analysis-header .who small { display: block; color: var(--muted); font-size: 0.82rem; margin-top: 2px; }
+              .analysis-header .header-badges { display: flex; gap: 8px; flex-wrap: wrap; }
+
+              /* KPI cards */
+              .kpi-grid {
+                display: grid; gap: 12px;
+                grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+              }
+              .kpi {
+                background: linear-gradient(180deg, var(--surface), var(--surface-2));
                 border: 1px solid var(--line);
                 border-radius: 14px;
-                padding: 20px;
+                padding: 14px 16px;
+                position: relative; overflow: hidden;
               }
-              .title { margin: 0; font-size: 1.4rem; }
-              .subtitle { margin: 6px 0 0; color: var(--muted); font-size: 0.92rem; }
-              .input-group { margin-top: 16px; display: grid; gap: 10px; }
-              input {
-                width: 100%;
-                box-sizing: border-box;
-                border-radius: 10px;
-                border: 1px solid var(--line);
-                background: #0b1220;
-                color: var(--text);
-                padding: 10px 12px;
-                font-family: inherit;
+              .kpi .label { font-size: 0.78rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600; }
+              .kpi .value { font-size: 1.6rem; font-weight: 800; margin-top: 4px; letter-spacing: -0.02em; }
+              .kpi .sub { font-size: 0.82rem; color: var(--muted-soft); margin-top: 2px; }
+              .kpi.accent { border-color: rgba(255,61,127,0.35); }
+              .kpi.accent::after {
+                content: ""; position: absolute; right: -20px; bottom: -20px;
+                width: 90px; height: 90px; border-radius: 50%;
+                background: radial-gradient(circle, rgba(255,61,127,0.25), transparent 70%);
               }
-              .actions { margin-top: 10px; display: flex; gap: 10px; }
-              button {
-                border: none;
-                border-radius: 9px;
-                padding: 10px 14px;
+
+              /* Tabs */
+              .tabs {
+                display: flex; gap: 6px; padding: 6px;
+                background: var(--surface); border: 1px solid var(--line);
+                border-radius: 14px; overflow-x: auto;
+              }
+              .tab {
+                flex: 1; min-width: 100px; padding: 9px 12px;
+                border-radius: 10px; cursor: pointer; font-weight: 600;
+                color: var(--muted-soft); font-size: 0.88rem; text-align: center;
+                transition: background 0.15s, color 0.15s;
+                user-select: none; white-space: nowrap;
+              }
+              .tab:hover { color: #fff; }
+              .tab.active {
+                background: linear-gradient(135deg, var(--primary), var(--primary-2));
                 color: #fff;
-                font-weight: 600;
-                cursor: pointer;
               }
-              .analyze-btn { background: linear-gradient(180deg, #10b981, #059669); }
-              .result {
-                margin-top: 16px;
+
+              .panel { display: none; }
+              .panel.active { display: grid; gap: 14px; }
+
+              .section {
+                background: var(--surface); border: 1px solid var(--line);
+                border-radius: 16px; padding: 18px 20px;
+              }
+              .section h3 {
+                margin: 0 0 12px; font-size: 1rem; letter-spacing: 0.01em;
+                display: flex; align-items: center; gap: 10px;
+              }
+              .section h3 .pill {
+                font-size: 0.7rem; font-weight: 600; padding: 3px 8px;
+                border-radius: 999px; background: rgba(255,61,127,0.12); color: var(--primary);
+                border: 1px solid rgba(255,61,127,0.25); letter-spacing: 0.04em; text-transform: uppercase;
+              }
+              .section h3 .pill.cool { background: rgba(56,189,248,0.12); color: var(--accent); border-color: rgba(56,189,248,0.25); }
+              .section h3 .pill.violet { background: rgba(129,140,248,0.12); color: var(--accent-2); border-color: rgba(129,140,248,0.25); }
+
+              /* Listas estilizadas */
+              .insight-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; }
+              .insight-list li {
+                background: rgba(255,255,255,0.02);
                 border: 1px solid var(--line);
-                border-radius: 12px;
-                background: #0f172a;
-                padding: 14px;
+                border-left: 3px solid var(--accent);
+                border-radius: 10px;
+                padding: 10px 14px; font-size: 0.94rem; line-height: 1.5;
               }
-              .result h3 { margin-bottom: 8px; color: #93c5fd; }
-              .result h4 { margin-bottom: 8px; color: #c4b5fd; }
-              .hint { color: var(--muted); font-size: 0.84rem; margin-top: 8px; }
-              .meta { color: var(--muted); font-size: 0.82rem; margin-bottom: 8px; }
-              a { color: #93c5fd; text-decoration: none; }
+              .insight-list.problems li { border-left-color: var(--bad); }
+              .insight-list.opps li { border-left-color: var(--good); }
+              .insight-list.actions li { border-left-color: var(--primary); counter-increment: actcount; }
+              .insight-list.actions { counter-reset: actcount; }
+              .insight-list.actions li::before {
+                content: counter(actcount); display: inline-flex;
+                width: 22px; height: 22px; border-radius: 50%;
+                background: rgba(255,61,127,0.18); color: var(--primary);
+                font-weight: 700; font-size: 0.78rem; align-items: center; justify-content: center;
+                margin-right: 8px; vertical-align: middle;
+              }
+              .insight-list.violet li { border-left-color: var(--accent-2); }
+
+              /* Format distribution bars */
+              .format-grid { display: grid; gap: 10px; }
+              .format-row {
+                display: grid; grid-template-columns: 110px 1fr 70px; gap: 10px;
+                align-items: center; font-size: 0.9rem;
+              }
+              .format-label { font-weight: 600; color: var(--muted-soft); text-transform: capitalize; }
+              .format-bar {
+                position: relative; height: 10px; border-radius: 999px;
+                background: rgba(255,255,255,0.06); overflow: hidden;
+              }
+              .format-fill {
+                position: absolute; inset: 0;
+                background: linear-gradient(90deg, var(--primary), var(--primary-2));
+                border-radius: 999px; transform-origin: left;
+              }
+              .format-pct { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted-soft); }
+              .format-er { grid-column: 2 / 4; font-size: 0.78rem; color: var(--muted); margin-top: 2px; }
+
+              /* Top items */
+              .top-grid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+              .top-card {
+                border: 1px solid var(--line); border-radius: 12px;
+                background: rgba(255,255,255,0.02); padding: 12px 14px;
+                display: flex; gap: 12px; align-items: flex-start;
+              }
+              .top-card .rank {
+                width: 28px; height: 28px; border-radius: 8px;
+                background: rgba(255,61,127,0.15); color: var(--primary);
+                display: flex; align-items: center; justify-content: center;
+                font-weight: 800; flex-shrink: 0; font-size: 0.85rem;
+              }
+              .top-card .meta-row { display: flex; gap: 12px; flex-wrap: wrap; color: var(--muted-soft); font-size: 0.82rem; }
+              .top-card a { color: var(--accent); text-decoration: none; font-size: 0.82rem; }
+              .top-card a:hover { text-decoration: underline; }
+
+              /* Comparações temporais */
+              .compare-grid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+              .compare-card {
+                border: 1px solid var(--line); border-radius: 12px;
+                background: rgba(255,255,255,0.02); padding: 12px 14px;
+              }
+              .compare-card .label { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); font-weight: 700; }
+              .compare-card .rows { margin-top: 8px; display: grid; gap: 4px; font-size: 0.88rem; }
+              .compare-card .delta { font-weight: 700; font-variant-numeric: tabular-nums; }
+              .delta.up { color: var(--good); }
+              .delta.down { color: var(--bad); }
+              .compare-card.empty-card { color: var(--muted); font-size: 0.88rem; text-align: center; padding: 18px; }
+
+              /* Hashtags */
+              .hashtag-grid { display: flex; flex-wrap: wrap; gap: 8px; }
+              .hashtag {
+                display: inline-flex; align-items: center; gap: 6px;
+                padding: 6px 10px; border-radius: 999px;
+                background: rgba(56,189,248,0.10); color: var(--accent);
+                border: 1px solid rgba(56,189,248,0.25);
+                font-size: 0.82rem; font-weight: 600;
+              }
+              .hashtag .count { color: var(--muted-soft); font-weight: 500; font-size: 0.75rem; }
+
+              /* Metric pills */
+              .metric-pills { display: flex; flex-wrap: wrap; gap: 8px; }
+              .metric-pill {
+                background: rgba(255,255,255,0.04); border: 1px solid var(--line);
+                border-radius: 10px; padding: 8px 12px; font-size: 0.84rem;
+                color: var(--muted-soft);
+              }
+              .metric-pill strong { color: var(--text); margin-right: 4px; }
+
+              .gap-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 6px; }
+              .gap-list li {
+                background: rgba(251,191,36,0.06); border: 1px solid rgba(251,191,36,0.25);
+                color: #fde68a; border-radius: 10px;
+                padding: 8px 12px; font-size: 0.86rem;
+              }
+
+              .err {
+                background: rgba(248,113,113,0.08); border: 1px solid rgba(248,113,113,0.3);
+                color: #fecaca; border-radius: 12px; padding: 12px 14px; font-size: 0.9rem;
+              }
+
+              @media (max-width: 680px) {
+                .form { grid-template-columns: 1fr; }
+                .analysis-header { flex-direction: column; align-items: flex-start; }
+              }
             </style>
           </head>
           <body>
             <div class="wrap">
-              <p><a href="/">← Voltar ao Diretor</a></p>
-              <div class="card">
-                <h1 class="title">Agente Redes Sociais · Instagram (MVP)</h1>
-                <p class="subtitle">Insere o perfil e clica em analisar. Se fizeres login Instagram, a análise fica mais completa.</p>
-                <div class="input-group">
-                  <input id="profileInput" placeholder="Username ou link do Instagram (ex.: @nome ou https://instagram.com/nome)" />
+              <div class="nav">
+                <a class="back" href="/">← Voltar ao Diretor</a>
+                <div class="brand"><span class="logo-dot"></span> Agente Redes Sociais</div>
+              </div>
+              <div class="hero">
+                <div class="hero-top">
+                  <div class="hero-icon">IG</div>
+                  <div>
+                    <h1 class="title">Análise Inteligente de Instagram</h1>
+                    <p class="subtitle">Insere um perfil público e obtém insights, ações e recomendações de IA. Para a tua conta, faz login para dados oficiais.</p>
+                  </div>
                 </div>
-                <div class="actions">
-                  <button type="button" class="analyze-btn" onclick="startInstagramLogin()">Login Instagram</button>
-                  <button type="button" class="analyze-btn" onclick="runInstagramAnalysis()">Analisar</button>
+                <div class="form">
+                  <div class="input-wrap">
+                    <input id="profileInput" class="profile" placeholder="username ou link do Instagram" />
+                  </div>
+                  <button type="button" class="btn-login" onclick="startInstagramLogin()">Login Instagram</button>
+                  <button type="button" class="btn-analyze" onclick="runInstagramAnalysis()">Analisar</button>
                 </div>
-                <p id="authStatus" class="hint">Estado login: a verificar...</p>
-                <p class="hint">Resultado: insights, problemas, oportunidades, ações prioritárias, ideias de conteúdo e plano de crescimento.</p>
-                <div id="result" class="result"></div>
+                <div class="auth-row">
+                  <span id="authStatus" class="badge"><span class="dot"></span> a verificar login...</span>
+                  <span class="badge info"><span class="dot"></span> MVP · Instagram</span>
+                </div>
+              </div>
+
+              <div id="result" class="results">
+                <div class="empty">
+                  <div class="big">Sem análise ainda</div>
+                  <div>Coloca um <strong>@username</strong> ou link do Instagram em cima e clica <strong>Analisar</strong>.</div>
+                </div>
               </div>
             </div>
+
             <script>
               const profileInput = document.getElementById("profileInput");
               const result = document.getElementById("result");
               const authStatus = document.getElementById("authStatus");
 
-              function renderList(items) {
-                if (!Array.isArray(items) || !items.length) return "<li>Sem dados suficientes.</li>";
-                return items.map(item => `<li>${item}</li>`).join("");
+              function escapeHtml(value) {
+                return String(value ?? "")
+                  .replace(/&/g, "&amp;")
+                  .replace(/</g, "&lt;")
+                  .replace(/>/g, "&gt;")
+                  .replace(/"/g, "&quot;")
+                  .replace(/'/g, "&#39;");
               }
 
-              function renderMetrics(obj) {
+              function formatNumber(value) {
+                if (value === null || value === undefined || value === "") return "—";
+                const num = Number(value);
+                if (Number.isNaN(num)) return String(value);
+                if (Math.abs(num) >= 1e9) return (num / 1e9).toFixed(1).replace(/\\.0$/, "") + "B";
+                if (Math.abs(num) >= 1e6) return (num / 1e6).toFixed(1).replace(/\\.0$/, "") + "M";
+                if (Math.abs(num) >= 1e3) return (num / 1e3).toFixed(1).replace(/\\.0$/, "") + "k";
+                return Number.isInteger(num) ? String(num) : num.toFixed(2);
+              }
+
+              function formatPct(value) {
+                if (value === null || value === undefined) return "—";
+                const num = Number(value);
+                if (Number.isNaN(num)) return "—";
+                return num.toFixed(2) + "%";
+              }
+
+              function formatDelta(delta, pct) {
+                if (delta === null || delta === undefined) return { text: "—", cls: "" };
+                const num = Number(delta);
+                if (Number.isNaN(num)) return { text: "—", cls: "" };
+                const sign = num > 0 ? "+" : "";
+                const pctTxt = (pct !== null && pct !== undefined && !Number.isNaN(Number(pct)))
+                  ? ` (${sign}${Number(pct).toFixed(1)}%)`
+                  : "";
+                const cls = num > 0 ? "up" : (num < 0 ? "down" : "");
+                return { text: `${sign}${formatNumber(num)}${pctTxt}`, cls };
+              }
+
+              function arrow(cls) {
+                if (cls === "up") return "▲";
+                if (cls === "down") return "▼";
+                return "—";
+              }
+
+              function listSection(items, klass = "") {
+                if (!Array.isArray(items) || !items.length) {
+                  return `<li style="color: var(--muted)">Sem dados suficientes.</li>`;
+                }
+                return items.map(item => `<li>${escapeHtml(item)}</li>`).join("");
+              }
+
+              function renderHeader(data) {
+                const username = data.profile_username || "n/d";
+                const confidence = (data.confianca_analise || "baixa").toLowerCase();
+                const confCls = confidence === "alta" ? "ok" : (confidence === "media" ? "warn" : "bad");
+                const profile = data.public_profile_data || {};
+                const quality = (profile.data_quality || "—").toString();
+                const qCls = quality === "alta" ? "ok" : (quality === "media" ? "warn" : "bad");
+                const initial = escapeHtml(username.charAt(0).toUpperCase() || "?");
+                const followers = profile.followers_count !== undefined && profile.followers_count !== null
+                  ? formatNumber(profile.followers_count) + " seguidores"
+                  : "perfil Instagram";
+
+                return `
+                  <div class="analysis-header">
+                    <div class="who">
+                      <div class="ig-avatar">${initial}</div>
+                      <div>
+                        <h2>@${escapeHtml(username)}</h2>
+                        <small>${escapeHtml(followers)}</small>
+                      </div>
+                    </div>
+                    <div class="header-badges">
+                      <span class="badge ${confCls}"><span class="dot"></span> Confiança: ${escapeHtml(confidence)}</span>
+                      <span class="badge ${qCls}"><span class="dot"></span> Qualidade dados: ${escapeHtml(quality)}</span>
+                    </div>
+                  </div>
+                `;
+              }
+
+              function renderKpis(data) {
+                const profile = data.public_profile_data || {};
+                const enrichment = profile.apify_enrichment || {};
+                const cadence = enrichment.posting_cadence || {};
+                const reelsStats = enrichment.reels_playcount_stats || {};
+
+                const kpis = [
+                  { label: "Seguidores", value: formatNumber(profile.followers_count), sub: profile.following_count !== undefined ? `Segue ${formatNumber(profile.following_count)}` : "", accent: true },
+                  { label: "Posts", value: formatNumber(profile.posts_count), sub: cadence.posts_last_30_days !== undefined ? `${cadence.posts_last_30_days} nos últimos 30d` : "" },
+                  { label: "Engagement", value: profile.engagement_rate !== null && profile.engagement_rate !== undefined ? formatPct(profile.engagement_rate) : "—", sub: "média recente" },
+                  { label: "Reels (avg plays)", value: reelsStats.avg_play_count !== undefined ? formatNumber(reelsStats.avg_play_count) : "—", sub: reelsStats.count ? `${reelsStats.count} reels analisados` : "" },
+                ];
+
+                return `
+                  <div class="kpi-grid">
+                    ${kpis.map(k => `
+                      <div class="kpi ${k.accent ? "accent" : ""}">
+                        <div class="label">${k.label}</div>
+                        <div class="value">${k.value}</div>
+                        ${k.sub ? `<div class="sub">${escapeHtml(k.sub)}</div>` : ""}
+                      </div>
+                    `).join("")}
+                  </div>
+                `;
+              }
+
+              function renderFormatBars(distribution) {
+                if (!distribution || typeof distribution !== "object") {
+                  return `<div style="color: var(--muted)">Sem dados de formato.</div>`;
+                }
+                const entries = Object.entries(distribution);
+                if (!entries.length) return `<div style="color: var(--muted)">Sem dados de formato.</div>`;
+                entries.sort((a, b) => (b[1].share_pct || 0) - (a[1].share_pct || 0));
+                return `
+                  <div class="format-grid">
+                    ${entries.map(([fmt, info]) => {
+                      const share = typeof info.share_pct === "number" ? info.share_pct : 0;
+                      const er = info.avg_engagement_pct;
+                      return `
+                        <div class="format-row">
+                          <div class="format-label">${escapeHtml(fmt)}</div>
+                          <div>
+                            <div class="format-bar"><div class="format-fill" style="width:${Math.max(2, share)}%"></div></div>
+                            ${er !== null && er !== undefined ? `<div class="format-er">engagement médio ${Number(er).toFixed(2)}%</div>` : ""}
+                          </div>
+                          <div class="format-pct">${share.toFixed(1)}%</div>
+                        </div>
+                      `;
+                    }).join("")}
+                  </div>
+                `;
+              }
+
+              function renderTopCards(items, type) {
+                if (!Array.isArray(items) || !items.length) {
+                  return `<div style="color: var(--muted)">Sem ${type}.</div>`;
+                }
+                return `
+                  <div class="top-grid">
+                    ${items.map((item, idx) => `
+                      <div class="top-card">
+                        <div class="rank">#${idx + 1}</div>
+                        <div style="flex:1; min-width:0">
+                          <div class="meta-row">
+                            <span>♥ ${formatNumber(item.likes)}</span>
+                            <span>💬 ${formatNumber(item.comments)}</span>
+                            ${item.playCount !== null && item.playCount !== undefined ? `<span>▶ ${formatNumber(item.playCount)}</span>` : ""}
+                          </div>
+                          ${item.url ? `<a href="${escapeHtml(item.url)}" target="_blank" rel="noopener">abrir no Instagram ↗</a>` : ""}
+                        </div>
+                      </div>
+                    `).join("")}
+                  </div>
+                `;
+              }
+
+              function renderComparisons(comparisons) {
+                const blocks = [
+                  { key: "one_week", label: "1 semana" },
+                  { key: "two_weeks", label: "2 semanas" },
+                  { key: "one_month", label: "1 mês" },
+                ];
+                return `
+                  <div class="compare-grid">
+                    ${blocks.map(b => {
+                      const obj = (comparisons || {})[b.key];
+                      if (!obj || !obj.available) {
+                        return `<div class="compare-card empty-card"><div class="label">${b.label}</div><div style="margin-top:6px">sem histórico ainda</div></div>`;
+                      }
+                      const f = obj.followers || {};
+                      const e = obj.engagement_rate || {};
+                      const p = obj.posts || {};
+                      const df = formatDelta(f.delta, f.delta_pct);
+                      const de = formatDelta(e.delta, e.delta_pct);
+                      const dp = formatDelta(p.delta, p.delta_pct);
+                      return `
+                        <div class="compare-card">
+                          <div class="label">${b.label}</div>
+                          <div class="rows">
+                            <div>Followers <span class="delta ${df.cls}">${arrow(df.cls)} ${df.text}</span></div>
+                            <div>Engagement <span class="delta ${de.cls}">${arrow(de.cls)} ${de.text}</span></div>
+                            <div>Posts <span class="delta ${dp.cls}">${arrow(dp.cls)} ${dp.text}</span></div>
+                          </div>
+                        </div>
+                      `;
+                    }).join("")}
+                  </div>
+                `;
+              }
+
+              function renderMetricPills(obj) {
                 if (!obj || typeof obj !== "object" || Array.isArray(obj)) {
-                  return "<li>Sem dados.</li>";
+                  return `<div style="color: var(--muted)">Sem dados.</div>`;
                 }
                 const entries = Object.entries(obj);
-                if (!entries.length) return "<li>Sem dados.</li>";
-                return entries.map(([key, value]) => `<li><strong>${key}:</strong> ${String(value)}</li>`).join("");
+                if (!entries.length) return `<div style="color: var(--muted)">Sem dados.</div>`;
+                return `
+                  <div class="metric-pills">
+                    ${entries.map(([k, v]) => `<span class="metric-pill"><strong>${escapeHtml(k)}:</strong> ${escapeHtml(v)}</span>`).join("")}
+                  </div>
+                `;
               }
 
-              function renderComparisonBlock(label, obj) {
-                if (!obj || !obj.available) {
-                  return `<li><strong>${label}:</strong> sem histórico suficiente.</li>`;
+              function renderHashtags(hashtags) {
+                if (!Array.isArray(hashtags) || !hashtags.length) return `<div style="color: var(--muted)">Sem hashtags.</div>`;
+                return `
+                  <div class="hashtag-grid">
+                    ${hashtags.map(h => `<span class="hashtag">#${escapeHtml(h.tag)} <span class="count">${h.count}x</span></span>`).join("")}
+                  </div>
+                `;
+              }
+
+              function renderCadence(cadence, reelsStats) {
+                const pills = [];
+                if (cadence.posts_last_30_days !== undefined) pills.push(["Posts (30d)", cadence.posts_last_30_days]);
+                if (cadence.avg_days_between_posts !== undefined) pills.push(["Intervalo médio", `${cadence.avg_days_between_posts} dias`]);
+                if (cadence.last_post_at) {
+                  const d = new Date(cadence.last_post_at);
+                  pills.push(["Último post", isNaN(d) ? cadence.last_post_at : d.toLocaleDateString("pt-PT")]);
                 }
-                const followersDelta = obj.followers && obj.followers.delta !== null ? obj.followers.delta : "n/d";
-                const engagementDelta = obj.engagement_rate && obj.engagement_rate.delta !== null ? obj.engagement_rate.delta : "n/d";
-                const postsDelta = obj.posts && obj.posts.delta !== null ? obj.posts.delta : "n/d";
-                return `<li><strong>${label}:</strong> followers Δ ${followersDelta}, engagement Δ ${engagementDelta}, posts Δ ${postsDelta}</li>`;
+                if (reelsStats && reelsStats.count !== undefined) {
+                  pills.push(["Reels analisados", reelsStats.count]);
+                  pills.push(["Plays mediano", formatNumber(reelsStats.median_play_count)]);
+                  pills.push(["Plays máximo", formatNumber(reelsStats.max_play_count)]);
+                }
+                if (!pills.length) return `<div style="color: var(--muted)">Sem dados.</div>`;
+                return `
+                  <div class="metric-pills">
+                    ${pills.map(([k, v]) => `<span class="metric-pill"><strong>${escapeHtml(k)}:</strong> ${escapeHtml(v)}</span>`).join("")}
+                  </div>
+                `;
+              }
+
+              function renderTabs() {
+                return `
+                  <div class="tabs">
+                    <div class="tab active" data-target="overview">Visão Geral</div>
+                    <div class="tab" data-target="actions">Ações &amp; Ideias</div>
+                    <div class="tab" data-target="content">Conteúdo</div>
+                    <div class="tab" data-target="evolution">Evolução</div>
+                  </div>
+                `;
+              }
+
+              function attachTabHandlers() {
+                document.querySelectorAll(".tab").forEach(tab => {
+                  tab.addEventListener("click", () => {
+                    document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
+                    document.querySelectorAll(".panel").forEach(p => p.classList.remove("active"));
+                    tab.classList.add("active");
+                    const target = tab.getAttribute("data-target");
+                    const panel = document.getElementById("panel-" + target);
+                    if (panel) panel.classList.add("active");
+                  });
+                });
               }
 
               function startInstagramLogin() {
@@ -3748,38 +4744,41 @@ def agent_page(agent_slug: str) -> str:
                   const response = await fetch("/agents/social-media/auth/status");
                   const data = await response.json();
                   if (!response.ok) {
-                    authStatus.textContent = "Estado login: erro ao validar autenticação.";
+                    authStatus.className = "badge bad";
+                    authStatus.innerHTML = `<span class="dot"></span> erro ao validar login`;
                     return;
                   }
                   if (data.connected) {
-                    const username = data.username ? `@${data.username}` : "conta autenticada";
-                    authStatus.textContent = `Estado login: ligado (${username}).`;
+                    const username = data.username ? `@${data.username}` : "conta ligada";
+                    authStatus.className = "badge ok";
+                    authStatus.innerHTML = `<span class="dot"></span> Ligado · ${escapeHtml(username)}`;
                     return;
                   }
-                  if (data.last_error) {
-                    authStatus.textContent = `Estado login: não ligado (${data.last_error}).`;
-                  } else {
-                    authStatus.textContent = "Estado login: não ligado.";
-                  }
+                  authStatus.className = "badge";
+                  authStatus.innerHTML = `<span class="dot"></span> Sem login Instagram`;
                 } catch (err) {
-                  authStatus.textContent = "Estado login: indisponível no momento.";
+                  authStatus.className = "badge bad";
+                  authStatus.innerHTML = `<span class="dot"></span> indisponível`;
                 }
               }
 
               async function runInstagramAnalysis() {
                 const profileValue = profileInput.value.trim();
+                if (!profileValue) {
+                  result.innerHTML = `<div class="err"><strong>Erro:</strong> Preenche o username/link do perfil.</div>`;
+                  return;
+                }
+                result.innerHTML = `
+                  <div class="loading">
+                    <div class="spinner"></div>
+                    <div>
+                      <div style="color: var(--text); font-weight:600">A processar análise de Instagram</div>
+                      <div style="font-size:0.85rem">Isto pode demorar alguns segundos…</div>
+                    </div>
+                  </div>
+                `;
                 try {
-                  if (!profileValue) {
-                    result.innerHTML = "<p><strong>Erro:</strong> Preenche o username/link do perfil.</p>";
-                    return;
-                  }
-                  result.innerHTML = "<p>A processar análise de Instagram...</p>";
-                  const payload = {
-                    profile_input: profileValue,
-                    instagram_data: {},
-                    language: "pt-PT"
-                  };
-
+                  const payload = { profile_input: profileValue, instagram_data: {}, language: "pt-PT" };
                   const response = await fetch("/agents/social-media/analyze", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
@@ -3788,34 +4787,103 @@ def agent_page(agent_slug: str) -> str:
                   const data = await response.json();
                   if (!response.ok) {
                     const detailText = data.detail || JSON.stringify(data);
-                    result.innerHTML = `<p><strong>Erro:</strong> ${detailText}</p>`;
+                    result.innerHTML = `<div class="err"><strong>Erro:</strong> ${escapeHtml(detailText)}</div>`;
                     return;
                   }
 
+                  const profile = data.public_profile_data || {};
+                  const enrichment = profile.apify_enrichment || {};
+
                   result.innerHTML = `
-                    <h3>Análise Instagram</h3>
-                    <p class="meta">Perfil: @${data.profile_username || "n/d"} · Confiança: ${data.confianca_analise || "baixa"}</p>
-                    <h4>Principais Insights</h4><ol>${renderList(data.principais_insights)}</ol>
-                    <h4>Problemas Identificados</h4><ol>${renderList(data.problemas_identificados)}</ol>
-                    <h4>Oportunidades</h4><ol>${renderList(data.oportunidades)}</ol>
-                    <h4>Ações Prioritárias</h4><ol>${renderList(data.acoes_prioritarias)}</ol>
-                    <h4>Ideias de Conteúdo</h4><ol>${renderList(data.ideias_conteudo)}</ol>
-                    <h4>Plano de Crescimento (curto prazo)</h4><ol>${renderList(data.plano_crescimento_curto_prazo)}</ol>
-                    <h4>Métricas Universais</h4><ul>${renderMetrics(data.metricas_universais)}</ul>
-                    <h4>Métricas Específicas Instagram</h4><ul>${renderMetrics(data.metricas_instagram)}</ul>
-                    <h4>Comparação Temporal</h4>
-                    <ul>
-                      ${renderComparisonBlock("1 semana", (data.comparisons || {}).one_week)}
-                      ${renderComparisonBlock("2 semanas", (data.comparisons || {}).two_weeks)}
-                      ${renderComparisonBlock("1 mês", (data.comparisons || {}).one_month)}
-                    </ul>
-                    <h4>Lacunas de Dados</h4><ol>${renderList(data.lacunas_de_dados)}</ol>
+                    ${renderHeader(data)}
+                    ${renderKpis(data)}
+                    ${renderTabs()}
+
+                    <div id="panel-overview" class="panel active">
+                      <div class="section">
+                        <h3>Principais Insights <span class="pill cool">IA</span></h3>
+                        <ul class="insight-list">${listSection(data.principais_insights)}</ul>
+                      </div>
+                      <div class="section">
+                        <h3>Problemas Identificados <span class="pill">atenção</span></h3>
+                        <ul class="insight-list problems">${listSection(data.problemas_identificados)}</ul>
+                      </div>
+                      <div class="section">
+                        <h3>Oportunidades <span class="pill cool">crescimento</span></h3>
+                        <ul class="insight-list opps">${listSection(data.oportunidades)}</ul>
+                      </div>
+                      <div class="section">
+                        <h3>Métricas Universais</h3>
+                        ${renderMetricPills(data.metricas_universais)}
+                      </div>
+                      <div class="section">
+                        <h3>Métricas Instagram</h3>
+                        ${renderMetricPills(data.metricas_instagram)}
+                      </div>
+                    </div>
+
+                    <div id="panel-actions" class="panel">
+                      <div class="section">
+                        <h3>Ações Prioritárias <span class="pill">agora</span></h3>
+                        <ul class="insight-list actions">${listSection(data.acoes_prioritarias)}</ul>
+                      </div>
+                      <div class="section">
+                        <h3>Ideias de Conteúdo <span class="pill violet">criativo</span></h3>
+                        <ul class="insight-list violet">${listSection(data.ideias_conteudo)}</ul>
+                      </div>
+                      <div class="section">
+                        <h3>Plano de Crescimento (curto prazo)</h3>
+                        <ul class="insight-list">${listSection(data.plano_crescimento_curto_prazo)}</ul>
+                      </div>
+                    </div>
+
+                    <div id="panel-content" class="panel">
+                      <div class="section">
+                        <h3>Distribuição por Formato</h3>
+                        ${renderFormatBars(enrichment.format_distribution)}
+                      </div>
+                      <div class="section">
+                        <h3>Top Posts <span class="pill cool">likes</span></h3>
+                        ${renderTopCards(enrichment.top_posts, "top posts")}
+                      </div>
+                      <div class="section">
+                        <h3>Top Reels <span class="pill violet">plays</span></h3>
+                        ${renderTopCards(enrichment.top_reels, "top reels")}
+                      </div>
+                      <div class="section">
+                        <h3>Cadência &amp; Reels</h3>
+                        ${renderCadence(enrichment.posting_cadence || {}, enrichment.reels_playcount_stats || {})}
+                      </div>
+                      <div class="section">
+                        <h3>Top Hashtags</h3>
+                        ${renderHashtags(enrichment.top_hashtags)}
+                      </div>
+                    </div>
+
+                    <div id="panel-evolution" class="panel">
+                      <div class="section">
+                        <h3>Comparação Temporal</h3>
+                        ${renderComparisons(data.comparisons)}
+                      </div>
+                      <div class="section">
+                        <h3>Lacunas de Dados</h3>
+                        <ul class="gap-list">${listSection(data.lacunas_de_dados)}</ul>
+                      </div>
+                    </div>
                   `;
+                  attachTabHandlers();
                 } catch (err) {
                   const errorMessage = err instanceof Error ? err.message : String(err);
-                  result.innerHTML = `<p><strong>Erro:</strong> ${errorMessage}</p>`;
+                  result.innerHTML = `<div class="err"><strong>Erro:</strong> ${escapeHtml(errorMessage)}</div>`;
                 }
               }
+
+              profileInput.addEventListener("keydown", (ev) => {
+                if (ev.key === "Enter") {
+                  ev.preventDefault();
+                  runInstagramAnalysis();
+                }
+              });
               refreshAuthStatus();
             </script>
           </body>

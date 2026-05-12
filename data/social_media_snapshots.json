@@ -15,6 +15,74 @@
       "following_count": 666,
       "posts_count": 1,
       "engagement_rate": 16.4045
+    },
+    {
+      "captured_at": "2026-05-12T17:51:56.897669+00:00",
+      "profile": "guilherme._.teixeira",
+      "followers_count": 447,
+      "following_count": 679,
+      "posts_count": 1,
+      "engagement_rate": 16.3311
+    },
+    {
+      "captured_at": "2026-05-12T17:56:11.571258+00:00",
+      "profile": "guilherme._.teixeira",
+      "followers_count": 447,
+      "following_count": 679,
+      "posts_count": 1,
+      "engagement_rate": 16.3311
+    },
+    {
+      "captured_at": "2026-05-12T18:14:13.319708+00:00",
+      "profile": "guilherme._.teixeira",
+      "followers_count": 447,
+      "following_count": 679,
+      "posts_count": 1,
+      "engagement_rate": 16.3311
+    },
+    {
+      "captured_at": "2026-05-12T18:14:54.422299+00:00",
+      "profile": "guilherme._.teixeira",
+      "followers_count": 447,
+      "following_count": 679,
+      "posts_count": 1,
+      "engagement_rate": 16.3311
+    }
+  ],
+  "cristiano": [
+    {
+      "captured_at": "2026-05-12T17:41:22.395269+00:00",
+      "profile": "cristiano",
+      "followers_count": 664297789,
+      "following_count": 631,
+      "posts_count": 4056,
+      "engagement_rate": 0.5183
+    },
+    {
+      "captured_at": "2026-05-12T17:59:39.033808+00:00",
+      "profile": "cristiano",
+      "followers_count": 664297789,
+      "following_count": 631,
+      "posts_count": 4056,
+      "engagement_rate": 0.5185
+    },
+    {
+      "captured_at": "2026-05-12T18:11:05.485946+00:00",
+      "profile": "cristiano",
+      "followers_count": 664297789,
+      "following_count": 631,
+      "posts_count": 4056,
+      "engagement_rate": 0.5187
+    }
+  ],
+  "_fabypinto_": [
+    {
+      "captured_at": "2026-05-12T17:55:18.629528+00:00",
+      "profile": "_fabypinto_",
+      "followers_count": 4546,
+      "following_count": 880,
+      "posts_count": 28,
+      "engagement_rate": 25.2713
     }
   ]
 }
