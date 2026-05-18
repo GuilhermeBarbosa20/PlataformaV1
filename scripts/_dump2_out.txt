@@ -1,0 +1,17 @@
+﻿
+=== renderHeader ===
+
+python : Traceback (most recent call last):
+At C:\Users\Gui\AppData\Local\Temp\ps-script-e0043876-5322-469f-bda4-6ef2070bfe82.ps1:80 char:1
++ python "C:\Users\Gui\Desktop\Cursor Teste\PlataformaV1\scripts\_dump_ ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Traceback (most recent call last)::String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  File "C:\Users\Gui\Desktop\Cursor Teste\PlataformaV1\scripts\_dump_linkedin_js2.py", line 13, in <module>
+    print(decoded[start : start + 2500])
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python313\Lib\encodings\cp1252.py", line 19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+           ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't encode characters in position 406-407: character maps to <undefined>

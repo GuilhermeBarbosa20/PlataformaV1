@@ -1,0 +1,10 @@
+      <div class="hero-layout">
+                  <div class="hero-main">
+                    <p class="field-label">Analisar outro perfil (URL público)</p>
+                    <div class="form li-analyze-form">
+                      <div class="input-wrap no-at">
+                        <input id="profileInput" class="profile" placeholder="https://www.linkedin.com/in/nome ou /company/empresa" />
+                      </div>
+                      <div class="analyze-actions">
+                        <button type="button" class="btn-analyze" onclick="runLinkedinProfileAnalysis()">Analisar</button>
+                        <button type="button" id="btnAutoAnalyze" class="btn-auto-analyze" oncli

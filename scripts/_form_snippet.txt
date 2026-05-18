@@ -1,0 +1,54 @@
+px;
+                display: grid;
+                grid-template-columns: 1fr minmax(200px, 240px);
+                gap: 20px;
+                align-items: start;
+              }
+              .hero-main { min-width: 0; }
+              .hero-auth {
+                display: flex;
+                flex-direction: column;
+                gap: 10px;
+              }
+              .field-label {
+                margin: 0 0 8px;
+                font-size: 0.82rem;
+                font-weight: 600;
+                color: var(--muted-soft);
+                text-transform: uppercase;
+                letter-spacing: 0.06em;
+              }
+              .field-hint {
+                margin: 8px 0 0;
+                font-size: 0.8rem;
+                color: var(--muted);
+              }
+              .li-analyze-form {
+                display: grid;
+                grid-template-columns: 1fr;
+                gap: 10px;
+              }
+              .li-my-profile-form {
+                display: grid;
+                grid-template-columns: 1fr auto;
+                gap: 10px;
+              }
+              .analyze-actions {
+                display: flex;
+                flex-direction: column;
+                gap: 10px;
+              }
+              .analyze-actions .btn-analyze,
+              .analyze-actions .btn-auto-analyze {
+                width: 100%;
+              }
+              .auth-status-col {
+                display: flex;
+                flex-direction: column;
+                gap: 8px;
+                align-items: stretch;
+              }
+              .auth-status-col .badge {
+                justify-content: center;
+                padding: 10px 12px;
+                

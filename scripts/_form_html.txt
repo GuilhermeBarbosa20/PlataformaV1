@@ -1,0 +1,31 @@
+l (fica na <strong>base de dados</strong>); depois o login + <strong>Auto-análise</strong> usam-no automaticamente. Para Instagram e outras redes, usa o <a href="/agentes/redes-sociais" style="color:var(--accent)">Agente Redes sociais</a>.</p>
+                  </div>
+                </div>
+                                <div class="hero-layout">
+                  <div class="hero-main">
+                    <p class="field-label">Analisar outro perfil (URL público)</p>
+                    <div class="form li-analyze-form">
+                      <div class="input-wrap no-at">
+                        <input id="profileInput" class="profile" placeholder="https://www.linkedin.com/in/nome ou /company/empresa" />
+                      </div>
+                      <div class="analyze-actions">
+                        <button type="button" class="btn-analyze" onclick="runLinkedinProfileAnalysis()">Analisar</button>
+                        <button type="button" id="btnAutoAnalyze" class="btn-auto-analyze" onclick="runLinkedinAutoProfileAnalysis()" disabled title="Guarda o teu perfil abaixo e inicia sessão">Auto-análise</button>
+                      </div>
+                    </div>
+
+                    <p class="field-label" style="margin-top:16px">O meu perfil LinkedIn (guardado na base de dados)</p>
+                    <div class="form li-my-profile-form">
+                      <div class="input-wrap no-at">
+                        <input id="myProfileInput" class="profile" placeholder="https://www.linkedin.com/in/o-teu-nome" />
+                      </div>
+                      <button type="button" id="btnSaveMyProfile" class="btn-save-profile" onclick="saveMyLinkedinProfileToDatabase()" disabled>Guardar na base de dados</button>
+                    </div>
+                    <p id="myProfileSaveHint" class="field-hint">Inicia sessão para associar o teu perfil à conta.</p>
+                  </div>
+
+                  <div class="hero-auth">
+                    <button type="button" id="btnLinkedinLogin" class="btn-linkedin btn-linkedin-block" onclick="startLinkedInSupabaseLogin()">Login LinkedIn (Supabase)</button>
+                    <div class="auth-status-col" id="authStatusCol" style="display:none">
+                      <span id="linkedinSupabaseStatus" class="badge ok"><span class="dot"></span> Autenticado</span>
+                      <button type="button" id="btnLinkedinLogout" class="btn-logout btn-logout-block" onclick="endLinkedInSupabaseSession()">T

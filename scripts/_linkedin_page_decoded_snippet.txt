@@ -1,0 +1,67 @@
+function renderKpis(data) {
+                const profile = data.public_profile_data || {};
+                const enrichment = profile.apify_enrichment || {};
+                const cadence = enrichment.posting_cadence || {};
+                const avgReact = enrichment.avg_reactions_per_post;
+                const avgComm = enrichment.avg_comments_per_post;
+                const engPct = enrichment.avg_engagement_pct ?? profile.engagement_rate;
+                const kpis = [
+                  { label: "LigaÃ§Ãµes", value: formatNumber(profile.followers_count), sub: profile.employer ? String(profile.employer).slice(0, 40) : "", accent: true },
+                  { label: "PublicaÃ§Ãµes", value: formatNumber(profile.posts_count || enrichment.posts_analyzed || (profile.recent_posts || []).length), sub: cadence.posts_last_30_days !== undefined ? `${cadence.posts_last_30_days} nos Ãºltimos 30d` : "" },
+                  { label: "ReaÃ§Ãµes mÃ©dias", value: avgReact !== undefined ? formatNumber(avgReact) : "â", sub: "por publicaÃ§Ã£o" },
+                  { label: "ComentÃ¡rios mÃ©dios", value: avgComm !== undefined ? formatNumber(avgComm) : "â", sub: engPct !== null && engPct !== undefined ? `eng. ${formatPct(engPct)}` : "por publicaÃ§Ã£o" },
+                ];
+
+                return `
+                  <div class="kpi-grid">
+                    ${kpis.map(k => `
+                      <div class="kpi ${k.accent ? "accent" : ""}">
+                        <div class="label">${k.label}</div>
+                        <div class="value">${k.value}</div>
+                        ${k.sub ? `<div class="sub">${escapeHtml(k.sub)}</div>` : ""}
+                      </div>
+                    `).join("")}
+                  </div>
+                `;
+              }
+
+              const LINKEDIN_FMT_LABELS = { texto: "Post texto", artigo: "Artigo", documento: "Documento/PDF", poll: "Sondagem", imagem: "Imagem", video: "VÃ­deo", evento: "Evento", partilha: "Partilha", desconhecido: "Outro" };
+              function linkedinFormatLabel(key) { return LINKEDIN_FMT_LABELS[key] || key; }
+
+              function renderFormatBars(distribution) {
+                if (!distribution || typeof distribution !== "object") {
+                  return `<div style="color: var(--muted)">Sem dados de formato.</div>`;
+                }
+                const entries = Object.entries(distribution);
+                if (!entries.length) return `<div style="color: var(--muted)">Sem dados de formato.</div>`;
+                entries.sort((a, b) => (b[1].share_pct || 0) - (a[1].share_pct || 0));
+                return `
+                  <div class="format-grid">
+                    ${entries.map(([fmt, info]) => {
+                      const share = typeof info.share_pct === "number" ? info.share_pct : 0;
+                      const er = info.avg_engagement_pct;
+                      return `
+                        <div class="format-row">
+                          <div class="format-label">${escapeHtml(fmt)}</div>
+                          <div>
+                            <div class="format-bar"><div class="format-fill" style="width:${Math.max(2, share)}%"></div></div>
+                            ${er !== null && er !== undefined ? `<div class="format-er">engagement mÃ©dio ${Number(er).toFixed(2)}%</div>` : ""}
+                          </div>
+                          <div class="format-pct">${share.toFixed(1)}%</div>
+                        </div>
+                      `;
+                    }).join("")}
+                  </div>
+                `;
+              }
+
+              function renderTopCards(items, type) {
+                if (!Array.isArray(items) || !items.length) {
+                  return `<div style="color: var(--muted)">Sem ${type}.</div>`;
+                }
+                return `
+                  <div class="top-grid">
+                    ${items.map((item, idx) => `
+                      <div class="top-card">
+                        <div class="rank">#${idx + 1}</div>
+ 

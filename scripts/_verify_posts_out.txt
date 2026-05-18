@@ -1,0 +1,49 @@
+﻿function renderLinkedinPostsContainer() {
+                const el = document.getElementById("linkedinPostsContainer");
+                if (!el) return;
+                if (!linkedinGeneratedPosts.length) {
+                  el.innerHTML = '<div class="li-posts-loading">Sem posts. Clica ½Gerar novamente╗.</div>';
+                  return;
+                }
+                el.innerHTML = linkedinGeneratedPosts.map((p) => {
+                  const st = p.status || "draft";
+                  const cls = ["li-post-card", st === "approved" ? "approved" : "", st === "editing" ? "editing" : ""].filter(Boolean).join(" ");
+                  const statusLabel = st === "approved" ? '<span class="li-post-status ok">Aprovado</span>' : (st === "editing" ? '<span class="li-post-status">A editar</span>' : '<span class="li-post-status">Rascunho</span>');
+                  const bodyBlock = st === "editing"
+                    ? `<textarea class="li-post-edit-area" id="edit-area-${escapeHtml(p.id)}">${escapeHtml(p.bodyEdit != null ? p.bodyEdit : p.body)}</textarea>`
+                    : `<p class="li-post-body">${escapeHtml(p.body)}</p>`;
+                  const actions = st === "editing"
+                    ? `<button type="button" class="btn-post-ok" onclick="saveLinkedinPostEdit('${escapeHtml(p.id)}')">Guardar</button>
+                       <button type="button" class="btn-post-edit" onclick="cancelLinkedinPostEdit('${escapeHtml(p.id)}')">Cancelar</button>
+                       <button type="button" class="btn-post-del" onclick="deleteLinkedinPost('${escapeHtml(p.id)}')">Apagar</button>`
+                    : `<button type="button" class="btn-post-ok" onclick="approveLinkedinPost('${escapeHtml(p.id)}')" ${st === "approved" ? "disabled" : ""}>Aprovado</button>
+                       <button type="button" class="btn-post-edit" onclick="startLinkedinPostEdit('${escapeHtml(p.id)}')">Editar</button>
+                       <button type="button" class="btn-post-redo" onclick="regenerateLinkedinPost('${escapeHtml(p.id)}')">Refazer</button>`;
+                  return `
+                    <div class="${cls}" data-post-id="${escapeHtml(p.id)}">
+                      <div class="li-post-head">
+                        <span class="li-post-type">${escapeHtml(linkedinPostTypeLabel(p.content_type))}</span>
+                        ${statusLabel}
+                      </div>
+                      <h4 class="li-post-title">${escapeHtml(p.title || "")}</h4>
+                      ${bodyBlock}
+                      ${p.hook ? `<div class="li-post-meta"><strong>Gancho:</strong> ${escapeHtml(p.hook)}</div>` : ""}
+                      ${p.cta ? `<div class="li-post-meta"><strong>CTA:</strong> ${escapeHtml(p.cta)}</div>` : ""}
+                      ${p.angle ? `<div class="li-post-meta"><strong>┬ngulo:</strong> ${escapeHtml(p.angle)}</div>` : ""}
+                      <div class="li-post-actions">${actions}</div>
+                    </div>
+                  `;
+                }).join("").replace(/<div/g, "<div").replace(/<\/div>/g, "</div>");
+              }
+
+              function approveLinkedinPost(id) {
+                const p = linkedinGeneratedPosts.find((x) => x.id === id);
+                if (!p) return;
+                p.status = "approved";
+                renderLinkedinPostsContainer();
+              }
+
+              function startLinkedinPostEdit(id) {
+                linkedinGeneratedPosts.forEach((x) => { if (x.status === "editing") x.status = "draft"; });
+ 
+--- motion count 1

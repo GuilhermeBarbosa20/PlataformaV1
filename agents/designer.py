@@ -10,7 +10,7 @@ import time
 import tempfile
 from urllib.parse import urlparse
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from urllib import error, request
 from uuid import uuid4
 from openai import OpenAI
@@ -374,6 +374,82 @@ class DesignerAgent:
 
         raise RuntimeError(
             "Falha ao gerar imagem em todos os providers configurados. " + " | ".join(errors)
+        )
+
+    def generate_image_for_linkedin_post(
+        self,
+        post: Dict[str, Any],
+        *,
+        size: str = "1024x1024",
+        edit_instructions: Optional[str] = None,
+    ) -> Dict[str, str]:
+        """Gera imagem ilustrativa alinhada ao texto de um post LinkedIn.
+
+        A função constrói um briefing visual a partir do título, gancho e corpo
+        do post e delega a geração ao fluxo standard do agente Designer
+        (``generate_image_from_chat``), adequado a feeds B2B.
+
+        Argumentos:
+            post: Dicionário com campos do post (``body``, ``title``, ``hook``,
+                ``content_type``, ``cta`` opcional).
+            size: Dimensão pedida ao motor de imagem (por defeito ``1024x1024``).
+            edit_instructions: Instruções opcionais ao refazer (ex.: tom, cores).
+
+        Retorno:
+            Dicionário com:
+            - ``image_url``: URL pública ou rota local da imagem gerada;
+            - ``prompt_used``: Prompt final enviado ao provider;
+            - ``provider``: Identificador do motor utilizado.
+
+        Raises:
+            RuntimeError: Quando nenhum provider de imagem está configurado ou
+                todos falham na geração.
+        """
+
+        body = str(post.get("body") or "").strip()
+        title = str(post.get("title") or "").strip() or "Post LinkedIn"
+        hook = str(post.get("hook") or "").strip()
+        cta = str(post.get("cta") or "").strip()
+        content_type = str(post.get("content_type") or "texto").strip().lower()
+        body_excerpt = body[:2400]
+        instr = str(edit_instructions or "").strip()
+
+        brief_parts = [
+            "Cria uma imagem profissional para acompanhar um post no LinkedIn (feed B2B).",
+            f"Tipo de conteúdo: {content_type}.",
+            f"Título: {title}.",
+        ]
+        if hook:
+            brief_parts.append(f"Gancho de abertura: {hook}.")
+        if cta:
+            brief_parts.append(f"CTA do post: {cta}.")
+        brief_parts.extend(
+            [
+                "",
+                "Texto completo do post:",
+                body_excerpt,
+                "",
+                "Requisitos da imagem:",
+                "- Estilo corporativo e moderno, adequado ao LinkedIn",
+                "- Ilustra visualmente o tema central (sem copiar o texto literalmente)",
+                "- Sem blocos de texto longos nem letras ilegíveis sobrepostas",
+                "- Composição limpa, boa iluminação, cores profissionais",
+                "- Formato adequado a feed (quadrado ou vertical suave)",
+            ]
+        )
+        if instr:
+            brief_parts.extend(
+                [
+                    "",
+                    "Instruções do utilizador para esta versão da imagem (prioridade):",
+                    instr,
+                ]
+            )
+        messages = [{"role": "user", "content": "\n".join(brief_parts)}]
+        return self.generate_image_from_chat(
+            messages=messages,
+            size=size,
+            style="LinkedIn B2B profissional",
         )
 
     def _format_provider_error_message(self, raw_error: str) -> str:
