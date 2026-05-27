@@ -2651,6 +2651,53 @@ def linkedin_calendar_posts_save(payload: LinkedInCalendarPostsSaveRequest) -> D
     return {"ok": True, "saved_to_database": True, "count": len(cleaned)}
 
 
+
+
+def _slim_linkedin_profile_for_post_generation(profile: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Remove dados Apify pesados antes de enviar análise/perfil ao modelo de posts."""
+
+    if not isinstance(profile, dict):
+        return {}
+    slim = dict(profile)
+    slim.pop("harvest_profile", None)
+    enrichment = slim.get("apify_enrichment")
+    if isinstance(enrichment, dict):
+        slim["apify_enrichment"] = {
+            k: v
+            for k, v in enrichment.items()
+            if k not in {"raw_posts", "posts_raw"}
+        }
+    recent = slim.get("recent_posts")
+    if isinstance(recent, list) and len(recent) > 8:
+        slim["recent_posts"] = recent[:8]
+    return slim
+
+
+def _slim_linkedin_analysis_for_post_generation(analysis: Dict[str, Any]) -> Dict[str, Any]:
+    """Reduz o JSON da análise para geração de posts (menos tokens/latência)."""
+
+    if not isinstance(analysis, dict):
+        return {}
+    keep_keys = (
+        "linkedin_own_profile",
+        "profile_url",
+        "profile_username",
+        "principais_insights",
+        "problemas_identificados",
+        "oportunidades",
+        "acoes_prioritarias",
+        "ideias_conteudo",
+        "plano_crescimento_curto_prazo",
+        "confianca_analise",
+        "lacunas_de_dados",
+        "public_profile_data",
+    )
+    slim = {key: analysis[key] for key in keep_keys if key in analysis}
+    ppd = slim.get("public_profile_data")
+    if isinstance(ppd, dict):
+        slim["public_profile_data"] = _slim_linkedin_profile_for_post_generation(ppd)
+    return slim
+
 @app.post("/agents/linkedin/generate-posts")
 def linkedin_generate_posts(payload: LinkedInGeneratePostsRequest) -> Dict[str, Any]:
     """Gera posts LinkedIn prontos a publicar com base na análise do perfil.
@@ -2667,16 +2714,19 @@ def linkedin_generate_posts(payload: LinkedInGeneratePostsRequest) -> Dict[str, 
 
     if not social_media_agent.is_configured():
         raise HTTPException(status_code=503, detail="OPENAI_API_KEY nao configurada no servidor.")
-    analysis = payload.analysis if isinstance(payload.analysis, dict) else {}
+    analysis = _slim_linkedin_analysis_for_post_generation(
+        payload.analysis if isinstance(payload.analysis, dict) else {}
+    )
     if not analysis.get("linkedin_own_profile"):
         raise HTTPException(
             status_code=403,
             detail="Gerar posts só está disponível na Auto-análise do teu perfil LinkedIn.",
         )
+    profile_data = _slim_linkedin_profile_for_post_generation(payload.public_profile_data)
     try:
         result = social_media_agent.generate_linkedin_posts_from_analysis(
             analysis,
-            public_profile_data=payload.public_profile_data,
+            public_profile_data=profile_data,
             profile_url=payload.profile_url,
             count=payload.count,
             language=payload.language,
@@ -2935,9 +2985,13 @@ def _linkedin_publish_callback_html(
       sessionStorage.setItem("plataforma_linkedin_publish_expires_at",
         String(Date.now() + {expires_js} * 1000));
     }} catch (e) {{}}
-    window.location.replace(path + "?publish_connected=1");
+    var sepOk = path.indexOf("?") >= 0 ? "&" : "?";
+    window.location.replace(path + sepOk + "publish_connected=1");
   }} else {{
-    setTimeout(function() {{ window.location.replace(path + "?publish_error=1"); }}, 2500);
+    setTimeout(function() {{
+      var sepErr = path.indexOf("?") >= 0 ? "&" : "?";
+      window.location.replace(path + sepErr + "publish_error=1");
+    }}, 2500);
   }}
 }})();
 </script>
