@@ -1,0 +1,12 @@
+function renderLinkedinProfileGridCard(k, v, pageKind) {
+                const missing = isMetricValueMissing(v);
+                const cls = linkedinMetricCardClasses(k, v, missing);
+                const label = escapeHtml(humanizeMetricKey(k, pageKind));
+                if (missing || !linkedinMetricNeedsDetailModal(v, k)) {
+                  const valueHtml = renderLinkedinMetricValueHtml(k, v, missing, pageKind);
+                  return `<div class="${cls}"><div class="li-metric-value">${valueHtml}</div><div class="li-metric-label">${label}</div></div>`;
+                }
+                const detailId = linkedinMetricRegisterDetail(k, v, pageKind);
+                const preview = escapeHtml(linkedinMetricCardPreview(v) || "Ver detalhes");
+                return `<div class="${cls} is-expandable" role="button" tabindex="0" data-detail-id="${detailId}" title="Clique para ver todos os detalhes"><div class="li-metric-value li-metric-value-preview">${preview}</div><div class="li-metric-label">${label}</div><span class="li-metric-open-hint">Clique para ver tudo →</span></div>`;
+              }

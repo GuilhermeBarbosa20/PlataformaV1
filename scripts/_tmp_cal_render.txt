@@ -1,0 +1,316 @@
+function renderLinkedinCalendarContainer() {
+                const el = document.getElementById("linkedinCalendarContainer");
+                if (!el) return;
+                ensureLinkedinPostsWeekDates("calendar");
+                const weekDays = getLinkedinWeekDays();
+                const dowNames = ["Domingo", "Segunda-feira", "Terça-feira", "Quarta-feira", "Quinta-feira", "Sexta-feira", "Sábado"];
+                const todayKey = formatLinkedinDateKey(new Date());
+                if (!linkedinCalendarPosts.length) {
+                  const emptyDays = weekDays.map((d) => {
+                    const key = formatLinkedinDateKey(d);
+                    const isToday = key === todayKey;
+                    return `
+                      <div class="li-calendar-day${isToday ? " is-today" : ""}">
+                        <div class="li-calendar-day-head">
+                          <span class="li-calendar-dow">${dowNames[d.getDay()]}</span>
+                          <span class="li-calendar-day-num">Dia ${d.getDate()}</span>
+                        </div>
+                        <div class="li-calendar-day-body">
+                          <div class="li-calendar-empty">Sem post planeado</div>
+                        </div>
+                      </div>`;
+                  }).join("");
+                  el.innerHTML = `<div class="li-calendar-title">${linkedinWeekTitle()}</div><div class="li-calendar-grid">${emptyDays}</div>`;
+                  return;
+                }
+                const postsByDate = {};
+                linkedinCalendarPosts.forEach((p) => {
+                  const key = p.scheduled_date || formatLinkedinDateKey(weekDays[0]);
+                  if (!postsByDate[key]) postsByDate[key] = [];
+                  postsByDate[key].push(p);
+                });
+                const grid = weekDays.map((d) => {
+                  const key = formatLinkedinDateKey(d);
+                  const isToday = key === todayKey;
+                  const dayPosts = (postsByDate[key] || []).map((p) => renderLinkedinPostCardHtml(p, true, "calendar")).join("");
+                  return `
+                    <div class="li-calendar-day${isToday ? " is-today" : ""}">
+                      <div class="li-calendar-day-head">
+                        <span class="li-calendar-dow">${dowNames[d.getDay()]}</span>
+                        <span class="li-calendar-day-num">Dia ${d.getDate()}</span>
+                      </div>
+                      <div class="li-calendar-day-body">
+                        ${dayPosts || '<div class="li-calendar-empty">Sem post planeado</div>'}
+                      </div>
+                    </div>`;
+                }).join("");
+                el.innerHTML = `<div class="li-calendar-title">${linkedinWeekTitle()}</div><div class="li-calendar-grid">${grid}</div>`;
+              }
+
+              async function approveLinkedinPost(id, scope) {
+                const entry = findLinkedinPostEntry(id);
+                const p = entry.post;
+                scope = scope || entry.scope;
+                if (!p || p.status === "approved") return;
+                p.status = "approved";
+                refreshLinkedinPostScope(scope);
+                const wantImage = confirm(
+                  "Queres gerar uma imagem para este post?\n\n" +
+                  "OK — gera uma imagem alinhada ao texto.\n" +
+                  "Cancelar — mantém só o texto aprovado."
+                );
+                if (!wantImage) return;
+                await linkedinGeneratePostImage(p, null, scope);
+              }
+
+              async function linkedinGeneratePostImage(p, editInstructions, scope) {
+                if (!p) return;
+                const entry = findLinkedinPostEntry(p.id);
+                scope = scope || entry.scope;
+                p.image_generating = true;
+                p.image_status = "draft";
+                refreshLinkedinPostScope(scope);
+                try {
+                  const resp = await fetch("/agents/linkedin/generate-post-image", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      post: {
+                        id: p.id,
+                        title: p.title,
+                        body: p.body,
+                        hook: p.hook,
+                        cta: p.cta,
+                        content_type: p.content_type,
+                      },
+                      edit_instructions: editInstructions || null,
+                    }),
+                  });
+                  const data = await resp.json().catch(() => ({}));
+                  if (!resp.ok) {
+                    const msg = data.detail || data.error || "Falha ao gerar imagem.";
+                    throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
+                  }
+                  p.generated_image_url = data.image_url || "";
+                  p.generated_image_prompt = data.prompt_used || "";
+                  p.image_status = "draft";
+                } catch (err) {
+                  alert(err && err.message ? err.message : "Não foi possível gerar a imagem.");
+                } finally {
+                  p.image_generating = false;
+                  refreshLinkedinPostScope(scope);
+                }
+              }
+
+              function approveLinkedinPostImage(id, scope) {
+                const entry = findLinkedinPostEntry(id);
+                const p = entry.post;
+                scope = scope || entry.scope;
+                if (!p || !p.generated_image_url || p.image_status === "approved") return;
+                p.image_status = "approved";
+                refreshLinkedinPostScope(scope);
+              }
+
+              
+              
+              function getPersistedLinkedinPublishToken() {
+                try {
+                  const exp = Number(sessionStorage.getItem(LINKEDIN_PUBLISH_EXPIRES_KEY) || 0);
+                  if (exp && Date.now() > exp) {
+                    sessionStorage.removeItem(LINKEDIN_PUBLISH_TOKEN_KEY);
+                    sessionStorage.removeItem(LINKEDIN_PUBLISH_URN_KEY);
+                    sessionStorage.removeItem(LINKEDIN_PUBLISH_EXPIRES_KEY);
+                    return null;
+                  }
+                  return sessionStorage.getItem(LINKEDIN_PUBLISH_TOKEN_KEY) || null;
+                } catch (e) {
+                  return null;
+                }
+              }
+
+              function hasLinkedinPublishAuthorization() {
+                return Boolean(getPersistedLinkedinPublishToken());
+              }
+
+              function connectLinkedinPublish() {
+                window.location.href = "/agents/linkedin/connect-publish";
+              }
+
+              (function handlePublishOAuthReturn() {
+                try {
+                  const q = new URLSearchParams(window.location.search);
+                  if (q.get("publish_connected") === "1") {
+                    history.replaceState({}, "", window.location.pathname);
+                  }
+                } catch (e) {}
+              })();
+
+async function publishLinkedinPost(id, includeImage, scope) {
+                const entry = findLinkedinPostEntry(id);
+                const p = entry.post;
+                scope = scope || entry.scope;
+                if (!p || p.status !== "approved" || p.published_on_linkedin) return;
+                if (includeImage && (!p.generated_image_url || p.image_status !== "approved")) {
+                  alert("Aprova a imagem antes de publicar com imagem.");
+                  return;
+                }
+                const modeLabel = includeImage ? "texto + imagem" : "só texto";
+                if (!confirm("Publicar no LinkedIn (" + modeLabel + ")?\n\nSerá usada a conta com que fizeste login.")) return;
+                const ctx = await getLinkedinSupabaseSession();
+                if (!ctx || !ctx.session) {
+                  alert("Inicia sessão com LinkedIn para publicar.");
+                  return;
+                }
+                const publishTok = getPersistedLinkedinPublishToken();
+                if (!publishTok) {
+                  alert("Primeiro clica em «Autorizar publicação no LinkedIn» na secção Publicar.");
+                  return;
+                }
+                const payload = appendLinkedinSessionFields({
+                  include_image: !!includeImage,
+                  linkedin_publish_access_token: publishTok,
+                  post: {
+                    id: p.id,
+                    title: p.title,
+                    body: p.body,
+                    hook: p.hook,
+                    cta: p.cta,
+                    content_type: p.content_type,
+                    generated_image_url: p.generated_image_url || null,
+                    status: p.status,
+                    image_status: p.image_status || null,
+                  },
+                }, ctx.session);
+                p.publishing_linkedin = true;
+                refreshLinkedinPostScope(scope);
+                try {
+                  const resp = await fetch("/agents/linkedin/publish-post", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(payload),
+                  });
+                  const data = await resp.json().catch(() => ({}));
+                  if (!resp.ok) {
+                    const msg = data.detail || data.error || "Falha ao publicar.";
+                    throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
+                  }
+                  p.published_on_linkedin = true;
+                  p.linkedin_post_urn = data.linkedin_post_urn || "";
+                  p.published_with_image = !!data.published_with_image;
+                } catch (err) {
+                  alert(err && err.message ? err.message : "Não foi possível publicar no LinkedIn.");
+                } finally {
+                  p.publishing_linkedin = false;
+                  refreshLinkedinPostScope(scope);
+                }
+              }
+
+async function regenerateLinkedinPostImage(id, scope) {
+                const entry = findLinkedinPostEntry(id);
+                const p = entry.post;
+                scope = scope || entry.scope;
+                if (!p || !p.generated_image_url) return;
+                const instr = window.prompt("Instruções para refazer a imagem (opcional):", "") || "";
+                await linkedinGeneratePostImage(p, instr || null, scope);
+              }
+
+              function startLinkedinPostEdit(id, scope) {
+                scope = scope || findLinkedinPostEntry(id).scope;
+                getLinkedinPostsArray(scope).forEach((x) => { if (x.status === "editing") x.status = "draft"; });
+                const p = getLinkedinPostsArray(scope).find((x) => x.id === id);
+                if (!p) return;
+                p.bodyEdit = p.body;
+                p.status = "editing";
+                refreshLinkedinPostScope(scope);
+              }
+
+              function cancelLinkedinPostEdit(id, scope) {
+                scope = scope || findLinkedinPostEntry(id).scope;
+                const p = getLinkedinPostsArray(scope).find((x) => x.id === id);
+                if (!p) return;
+                p.status = p.status === "approved" ? "approved" : "draft";
+                delete p.bodyEdit;
+                refreshLinkedinPostScope(scope);
+              }
+
+              function saveLinkedinPostEdit(id, scope) {
+                scope = scope || findLinkedinPostEntry(id).scope;
+                const p = getLinkedinPostsArray(scope).find((x) => x.id === id);
+                if (!p) return;
+                const ta = document.getElementById("edit-area-" + id);
+                if (ta) p.body = ta.value.trim() || p.body;
+                delete p.bodyEdit;
+                p.status = "draft";
+                refreshLinkedinPostScope(scope);
+              }
+
+              function deleteLinkedinPost(id, scope) {
+                if (!confirm("Apagar este post?")) return;
+                scope = scope || findLinkedinPostEntry(id).scope;
+                const list = getLinkedinPostsArray(scope);
+                if (scope === "calendar") {
+                  linkedinCalendarPosts = list.filter((x) => x.id !== id);
+                } else {
+                  linkedinPostsTabPosts = list.filter((x) => x.id !== id);
+                }
+                refreshLinkedinPostScope(scope);
+              }
+
+              async function regenerateLinkedinPost(id, scope) {
+                scope = scope || findLinkedinPostEntry(id).scope;
+                const p = getLinkedinPostsArray(scope).find((x) => x.id === id);
+                if (!p || !linkedinAnalysisSnapshot) return;
+                const instr = window.prompt("Instruções para refazer (opcional):", "") || "";
+                const card = document.querySelector(`[data-post-id="${id}"]`);
+                if (card) card.style.opacity = "0.55";
+                try {
+                  const res = await fetch("/agents/linkedin/regenerate-post", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      analysis: linkedinAnalysisSnapshot,
+                      public_profile_data: linkedinAnalysisSnapshot.public_profile_data || {},
+                      profile_url: linkedinAnalysisSnapshot.profile_url || "",
+                      post: { id: p.id, content_type: p.content_type, title: p.title, body: p.body, hook: p.hook, cta: p.cta, angle: p.angle },
+                      edit_instructions: instr || null,
+                      language: "pt-PT",
+                    }),
+                  });
+                  const json = await res.json();
+                  if (!res.ok) throw new Error(formatLinkedinApiError(json));
+                  const updated = json.post || {};
+                  Object.assign(p, updated, { id: p.id, status: "draft" });
+                  delete p.bodyEdit;
+                  delete p.generated_image_url;
+                  delete p.generated_image_prompt;
+                  delete p.image_generating;
+                  delete p.image_status;
+                  delete p.published_on_linkedin;
+                  delete p.linkedin_post_urn;
+                  delete p.published_with_image;
+                  delete p.publishing_linkedin;
+                  refreshLinkedinPostScope(scope);
+                  const btnDone = document.getElementById("btnGenerateLinkedinPosts");
+                  if (btnDone) { btnDone.disabled = false; btnDone.textContent = "Gerar novamente"; }
+                } catch (e) {
+                  alert("Erro ao refazer: " + (e.message || e));
+                } finally {
+                  if (card) card.style.opacity = "1";
+                }
+              }
+
+              function formatLinkedinApiError(json) {
+                const d = json && json.detail;
+                if (typeof d === "string") return d;
+                if (Array.isArray(d)) {
+                  return d.map((x) => {
+                    if (!x || typeof x !== "object") return String(x);
+                    const loc = Array.isArray(x.loc) ? x.loc.join(".") : "";
+                    return x.msg ? (loc ? loc + ": " + x.msg : x.msg) : JSON.stringify(x);
+                  }).join("; ");
+                }
+                if (d && typeof d === "object") return d.msg || JSON.stringify(d);
+                return json && json.error ? String(json.error) : "Pedido inválido.";
+              }
+
+              

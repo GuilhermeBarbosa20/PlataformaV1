@@ -1,0 +1,13 @@
+function renderLinkedinHarvestProfileOverview(obj, ctx, publicProfile) {
+                if (!obj || typeof obj !== "object" || Array.isArray(obj)) {
+                  return '<div class="li-metrics-empty">Sem dados de perfil.</div>';
+                }
+                const rawProfile = harvestRawProfile(publicProfile);
+                const pageKind = getLinkedinPageKind(ctx);
+                const isCompany = pageKind === "organization" || linkedinProfileMetricRaw(obj, "universalName") || linkedinProfileMetricRaw(obj, "tagline") || (rawProfile && (rawProfile.universalName || rawProfile.tagline));
+                if (isCompany && pageKind !== "personal") {
+                  return renderLinkedinCompanyProfileOverview(obj, ctx, rawProfile);
+                }
+                return renderLinkedinPersonalProfileOverview(obj, ctx, rawProfile);
+              }
+

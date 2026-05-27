@@ -1,0 +1,6 @@
+function harvestRawProfile(publicProfile) {
+                if (publicProfile && typeof publicProfile.harvest_profile === "object" && publicProfile.harvest_profile) {
+                  return publicProfile.harvest_profile;
+                }
+                return {};
+              }

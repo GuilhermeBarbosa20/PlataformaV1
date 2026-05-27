@@ -1,0 +1,38 @@
+function renderHeader(data) {
+                const username = data.profile_username || "n/d";
+                const confidence = (data.confianca_analise || "baixa").toLowerCase();
+                const confCls = confidence === "alta" ? "ok" : (confidence === "media" ? "warn" : "bad");
+                const profile = data.public_profile_data || {};
+                const quality = (profile.data_quality || "—").toString();
+                const qCls = quality === "alta" ? "ok" : (quality === "media" ? "warn" : "bad");
+                const initial = escapeHtml(username.charAt(0).toUpperCase() || "?");
+                const headline = profile.headline ? String(profile.headline) : "";
+                const employer = profile.employer ? String(profile.employer) : "";
+                const subParts = [];
+                if (headline) subParts.push(headline);
+                if (employer) subParts.push(employer);
+                const subLine = subParts.length ? subParts.join(" · ") : "perfil LinkedIn";
+                const profileUrl = profile.profile_url || data.profile_url || "";
+                const method = profile.collection_method || data.source || "";
+                const methodBadge = method && String(method).toLowerCase().includes("apify")
+                  ? `<span class="badge info"><span class="dot"></span> Dados: Apify (posts públicos)</span>`
+                  : (method ? `<span class="badge"><span class="dot"></span> ${escapeHtml(String(method))}</span>` : "");
+
+                return `
+                  <div class="analysis-header">
+                    <div class="who">
+                      <div class="ig-avatar">${initial}</div>
+                      <div>
+                        <h2>@${escapeHtml(username)}</h2>
+                        <small>${escapeHtml(subLine)}</small>
+                        ${profileUrl ? `<small><a href="${escapeHtml(profileUrl)}" target="_blank" rel="noopener" style="color:var(--accent)">Ver perfil no LinkedIn ↗</a></small>` : ""}
+                      </div>
+                    </div>
+                    <div class="header-badges">
+                      <span class="badge ${confCls}"><span class="dot"></span> Confiança: ${escapeHtml(confidence)}</span>
+                      <span class="badge ${qCls}"><span class="dot"></span> Qualidade dados: ${escapeHtml(quality)}</span>
+                      ${methodBadge}
+                    </div>
+                  </div>
+                `;
+              }

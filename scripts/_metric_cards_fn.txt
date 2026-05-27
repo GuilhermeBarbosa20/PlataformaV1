@@ -1,0 +1,15 @@
+function renderLinkedinMetricCards(obj, ctx) {
+                const pageKind = getLinkedinPageKind(ctx);
+                if (!obj || typeof obj !== "object" || Array.isArray(obj)) {
+                  return '<div class="li-metrics-empty">Sem indicadores para este perfil.</div>';
+                }
+                const entries = Object.entries(obj).filter(([k]) => String(k).trim());
+                if (!entries.length) {
+                  return '<div class="li-metrics-empty">Sem indicadores para este perfil.</div>';
+                }
+                return `
+                  <div class="li-metrics-grid">
+                    ${entries.map(([k, v]) => renderLinkedinProfileGridCard(k, v, pageKind)).join("")}
+                  </div>
+                `;
+              }

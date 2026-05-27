@@ -780,7 +780,7 @@ class SocialMediaAgent:
             analysis: Resultado da análise (insights, oportunidades, ideias, etc.).
             public_profile_data: Dados Apify/perfil recolhidos na análise.
             profile_url: URL público do perfil analisado.
-            count: Número de posts a gerar (1–6).
+            count: Número de posts a gerar (1–7).
             language: Idioma dos posts (por defeito ``pt-PT``).
 
         Retorno:
@@ -794,7 +794,7 @@ class SocialMediaAgent:
         if not self.is_configured():
             raise RuntimeError("OPENAI_API_KEY nao definida.")
 
-        n = max(1, min(6, int(count)))
+        n = max(1, min(7, int(count)))
         compact_analysis = json.dumps(analysis or {}, ensure_ascii=False, indent=2)
         compact_profile = json.dumps(public_profile_data or {}, ensure_ascii=False, indent=2)
         url_hint = str(profile_url or "").strip()
@@ -923,7 +923,7 @@ class SocialMediaAgent:
         if not isinstance(rows, list):
             return []
         out: List[Dict[str, Any]] = []
-        for row in rows[:6]:
+        for row in rows[:7]:
             if isinstance(row, dict):
                 out.append(self._normalize_linkedin_post_item(row))
         return out

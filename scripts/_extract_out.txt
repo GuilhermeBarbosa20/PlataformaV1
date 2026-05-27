@@ -1,0 +1,258 @@
+
+=== linkedinMetricNeedsDetailModal (930 chars) ===
+function linkedinMetricNeedsDetailModal(value) {
+                if (isMetricValueMissing(value)) return false;
+                if (Array.isArray(value) && value.length > 1) return true;
+                if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+                  const keys = Object.keys(value);
+                  if (keys.length > 2) return true;
+                  const joined = linkedinMetricPlainText(value);
+                  return joined.length > 120;
+                }
+                const text = linkedinMetricPlainText(value);
+                if (!text) return false;
+                if (text.length > 130) return true;
+                if (/\(\+\d+\s*mais\)/i.test(text)) return true;
+                if ((text.match(/;/g) || []).length >= 2) return true;
+                if (/^\d+\s*[—\-–]\s*/.test(text) && text.length > 70) return true;
+                return false;
+              }
+=== linkedinMetricCardPreview (1335 chars) ===
+function linkedinMetricCardPreview(value) {
+                const text = linkedinMetricPlainText(value);
+                if (!text) return "Ver detalhes";
+                const countMatch = text.match(/^(\d+)\s*[—\-–]\s*(.*)$/s);
+                if (countMatch) {
+                  const n = countMatch[1];
+                  const rest = (countMatch[2] || "").trim();
+                  const first = rest.split(";").map((s) => s.trim()).filter(Boolean)[0] || "";
+                  const short = first.length > 72 ? first.slice(0, 72) + "…" : first;
+                  return `${n} itens${short ? " · " + short : ""}`;
+                }
+                if (/\(\+\d+\s*mais\)/i.test(text)) {
+                  const head = text.replace(/\s*\(\+\d+\s*mais\)\s*$/i, "").trim();
+                  return head.length > 90 ? head.slice(0, 90) + "…" : head;
+                }
+                if (text.includes(";")) {
+                  const first = text.split(";").map((s) => s.trim()).filter(Boolean)[0] || "";
+                  const more = (text.match(/;/g) || []).length;
+                  const short = first.length > 70 ? first.slice(0, 70) + "…" : first;
+                  return more > 0 ? `${short} (+${more} mais)` : short;
+                }
+                return text.length > 110 ? text.slice(0, 110) + "…" : text;
+              }
+=== linkedinMetricDetailBodyHtml (2523 chars) ===
+function linkedinMetricDetailBodyHtml(key, value, pageKind) {
+                if (Array.isArray(value)) {
+                  const lines = value.map((item) => {
+                    if (item === null || item === undefined) return "";
+                    if (typeof item === "object") {
+                      return Object.entries(item)
+                        .filter(([_, v]) => v !== null && v !== undefined && String(v).trim())
+                        .map(([k, v]) => `${humanizeMetricKey(k, pageKind)}: ${String(v).trim()}`)
+                        .join(" · ");
+                    }
+                    return String(item).trim();
+                  }).filter(Boolean);
+                  return linkedinMetricDetailListHtml(lines);
+                }
+                if (typeof value === "object" && value !== null) {
+                  const rows = Object.entries(value).filter(
+                    ([_, v]) => v !== null && v !== undefined && String(v).trim()
+                  );
+                  if (!rows.length) return '<p class="li-metric-detail-prose">Sem detalhes.</p>';
+                  return `<dl class="li-metric-detail-kv">${rows
+                    .map(
+                      ([k, v]) =>
+                        `<dt>${escapeHtml(humanizeMetricKey(k, pageKind))}</dt><dd>${escapeHtml(
+                          linkedinMetricPlainText(v)
+                        )}</dd>`
+                    )
+                    .join("")}</dl>`;
+                }
+                const text = linkedinMetricPlainText(value);
+                const countMatch = text.match(/^(\d+)\s*[—\-–]\s*(.*)$/s);
+                if (countMatch) {
+                  const parts = (countMatch[2] || "")
+                    .replace(/\s*\(\+\d+\s*mais\)\s*$/i, "")
+                    .split(";")
+                    .map((s) => s.trim())
+                    .filter(Boolean);
+                  return (
+                    `<p class="li-metric-detail-count">${escapeHtml(countMatch[1])} registos</p>` +
+                    linkedinMetricDetailListHtml(parts)
+                  );
+                }
+                if (text.includes(";")) {
+                  const parts = text
+                    .replace(/\s*\(\+\d+\s*mais\)\s*$/i, "")
+                    .split(";")
+                    .map((s) => s.trim())
+                    .filter(Boolean);
+                  return linkedinMetricDetailListHtml(parts);
+                }
+                return `<div class="li-metric-detail-prose">${escapeHtml(text)}</div>`;
+              }
+=== linkedinMetricRegisterDetail (479 chars) ===
+function linkedinMetricRegisterDetail(key, value, pageKind) {
+                const id =
+                  "lmd-" +
+                  Date.now().toString(36) +
+                  "-" +
+                  Math.random().toString(36).slice(2, 8);
+                linkedinMetricDetailStore[id] = {
+                  key: String(key || ""),
+                  value: value,
+                  pageKind: pageKind || "personal",
+                };
+                return id;
+              }
+=== openLinkedinMetricDetailModal (915 chars) ===
+function openLinkedinMetricDetailModal(detailId) {
+                const entry = linkedinMetricDetailStore[detailId];
+                if (!entry) return;
+                const modal = document.getElementById("linkedinMetricDetailModal");
+                const titleEl = document.getElementById("linkedinMetricDetailModalTitle");
+                const bodyEl = document.getElementById("linkedinMetricDetailModalBody");
+                if (!modal || !titleEl || !bodyEl) return;
+                titleEl.textContent = humanizeMetricKey(entry.key, entry.pageKind);
+                bodyEl.innerHTML = linkedinMetricDetailBodyHtml(
+                  entry.key,
+                  entry.value,
+                  entry.pageKind
+                );
+                modal.classList.add("open");
+                modal.setAttribute("aria-hidden", "false");
+                document.body.style.overflow = "hidden";
+              }
+=== closeLinkedinMetricDetailModal (548 chars) ===
+function closeLinkedinMetricDetailModal() {
+                const modal = document.getElementById("linkedinMetricDetailModal");
+                if (!modal) return;
+                modal.classList.remove("open");
+                modal.setAttribute("aria-hidden", "true");
+                const calModal = document.getElementById("linkedinCalendarModal");
+                const calOpen = calModal && calModal.classList.contains("open");
+                if (!linkedinCalendarModalDateKey && !calOpen) document.body.style.overflow = "";
+              }
+=== renderLinkedinProfileGridCard (1257 chars) ===
+function renderLinkedinProfileGridCard(k, v, pageKind) {
+                const missing = isMetricValueMissing(v);
+                const cls = linkedinMetricCardClasses(k, v, missing);
+                const label = escapeHtml(humanizeMetricKey(k, pageKind));
+                if (missing || !linkedinMetricNeedsDetailModal(v)) {
+                  const valueHtml = renderLinkedinMetricValueHtml(k, v, missing, pageKind);
+                  return `<div class="${cls}"><div class="li-metric-value">${valueHtml}</div><div class="li-metric-label">${label}</div></div>`;
+                }
+                const detailId = linkedinMetricRegisterDetail(k, v, pageKind);
+                const preview = escapeHtml(linkedinMetricCardPreview(v) || "Ver detalhes");
+                return `<div class="${cls} is-expandable" role="button" tabindex="0" title="Clique para ver todos os detalhes" onclick="openLinkedinMetricDetailModal('${detailId}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openLinkedinMetricDetailModal('${detailId}');}"><div class="li-metric-value li-metric-value-preview">${preview}</div><div class="li-metric-label">${label}</div><span class="li-metric-open-hint">Clique para ver tudo →</span></div>`;
+              }
+=== renderLinkedinPersonalProfileOverview (5152 chars) ===
+function renderLinkedinPersonalProfileOverview(obj, ctx, rawProfile) {
+                const pageKind = getLinkedinPageKind(ctx);
+                const first = linkedinProfileMetricRaw(obj, "firstName");
+                const last = linkedinProfileMetricRaw(obj, "lastName");
+                const name = [first, last].filter(Boolean).join(" ") || "Perfil LinkedIn";
+                const headline = linkedinProfileMetricRaw(obj, "headline");
+                const location = linkedinProfileMetricRaw(obj, "location");
+                const url = linkedinProfileMetricRaw(obj, "linkedinUrl");
+                const connections = linkedinProfileMetricRaw(obj, "connectionsCount");
+                const followers = linkedinProfileMetricRaw(obj, "followerCount");
+                const slug = linkedinProfileMetricRaw(obj, "publicIdentifier");
+                const about = linkedinProfileMetricRaw(obj, "about");
+                const avatar = extractLinkedinMetricImageUrl("photo", obj.photo) || extractLinkedinMetricImageUrl("profilePicture", obj.profilePicture);
+                const coverUrl = extractLinkedinMetricImageUrl("coverPicture", obj.coverPicture);
+
+                const statsPills = [];
+                if (connections) statsPills.push(`<span class="li-profile-stat-pill"><strong>Ligações</strong>${escapeHtml(connections)}</span>`);
+                if (followers && followers !== connections) statsPills.push(`<span class="li-profile-stat-pill"><strong>Seguidores</strong>${escapeHtml(followers)}</span>`);
+                if (slug) statsPills.push(`<span class="li-profile-stat-pill"><strong>ID público</strong>${escapeHtml(slug)}</span>`);
+
+                const avatarHtml = avatar
+                  ? `<div class="li-profile-hero-avatar"><img src="${escapeHtml(avatar)}" alt="" loading="lazy" referrerpolicy="no-referrer" /></div>`
+                  : `<div class="li-profile-hero-avatar is-empty">${escapeHtml(linkedinProfileHeroInitials(first, last))}</div>`;
+
+                const flagsHtml = LI_PROFILE_BOOL_KEYS.filter((k) => k in obj).map((k) => {
+                  const v = linkedinProfileMetricRaw(obj, k) || "—";
+                  const yes = v.toLowerCase() === "sim";
+                  return `<span class="li-profile-flag${yes ? " is-yes" : ""}">${escapeHtml(humanizeMetricKey(k, pageKind))}: ${escapeHtml(v)}</span>`;
+                }).join("");
+
+                const gridEntries = Object.entries(obj).filter(([k]) => {
+                  const key = String(k).trim();
+                  return key && !LI_PROFILE_SKIP_GRID.has(key) && !key.startsWith("certification_") && key !== "certifications_extra" && !LI_PROFILE_BOOL_KEYS.includes(key) && !LI_PROFILE_TECH_KEYS.has(key);
+                });
+
+                const techEntries = Object.entries(obj).filter(([k]) => LI_PROFILE_TECH_KEYS.has(String(k).trim()));
+
+                const gridHtml = gridEntries.length
+                  ? `<div class="li-profile-section"><h5 class="li-profile-section-title">Experiência, formação e mais</h5><div class="li-metrics-grid li-metrics-grid--compact">${gridEntries.map(([k, v]) => renderLinkedinProfileGridCard(k, v, pageKind)).join("")}</div></div>` : "";
+
+                const techHtml = techEntries.length ? `<details class="li-profile-tech"><summary>Detalhes técnicos (${techEntries.length})</summary><div class="li-metrics-grid">${techEntries.map(([k, v]) => {
+                  const card = renderLinkedinProfileGridCard(k, v, pageKind);
+                  return card.replace('class="li-metric-card', 'class="li-metric-card is-id');
+                }).join("")}</div></details>` : "";
+
+                return `<div class="li-profile-overview">
+                  <div class="li-profile-hero">${avatarHtml}<div class="li-profile-hero-body">
+                    <h4 class="li-profile-hero-name">${escapeHtml(name)}</h4>
+                    ${headline ? `<p class="li-profile-hero-headline">${escapeHtml(headline)}</p>` : ""}
+                    ${location ? `<p class="li-profile-hero-meta">${escapeHtml(location)}</p>` : ""}
+                    ${statsPills.length ? `<div class="li-profile-hero-stats">${statsPills.join("")}</div>` : ""}
+                    <div class="li-profile-hero-actions">${url ? `<a class="li-profile-btn" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">Ver no LinkedIn</a>` : ""}</div>
+                  </div></div>
+                  ${flagsHtml ? `<div class="li-profile-flags"><span class="li-profile-flags-label">Estado do perfil</span>${flagsHtml}</div>` : ""}
+                  ${about ? `<div class="li-profile-section"><h5 class="li-profile-section-title">Sobre</h5><div class="li-profile-about">${escapeHtml(about)}</div></div>` : ""}
+                  ${coverUrl ? `<div class="li-profile-section"><h5 class="li-profile-section-title">Capa</h5><div class="li-profile-cover"><img src="${escapeHtml(coverUrl)}" alt="Capa" loading="lazy" referrerpolicy="no-referrer" /></div></div>` : ""}
+                  ${re
+... [truncated]
+
+=== renderLinkedinHarvestProfileOverview (868 chars) ===
+function renderLinkedinHarvestProfileOverview(obj, ctx, publicProfile) {
+                if (!obj || typeof obj !== "object" || Array.isArray(obj)) {
+                  return '<div class="li-metrics-empty">Sem dados de perfil.</div>';
+                }
+                const rawProfile = harvestRawProfile(publicProfile);
+                const pageKind = getLinkedinPageKind(ctx);
+                const isCompany = pageKind === "organization" || linkedinProfileMetricRaw(obj, "universalName") || linkedinProfileMetricRaw(obj, "tagline") || (rawProfile && (rawProfile.universalName || rawProfile.tagline));
+                if (isCompany && pageKind !== "personal") {
+                  return renderLinkedinCompanyProfileOverview(obj, ctx, rawProfile);
+                }
+                return renderLinkedinPersonalProfileOverview(obj, ctx, rawProfile);
+              }
+--- CSS/fragment .li-metric-card.is-expandable ---
+51,113,133,0.5); }
+              .li-cal-modal-body .li-post-card
+              .li-metric-card.is-expandable {
+                cursor: pointer;
+                transition: border-color 0.15s ease, background 0.15s ease, transform 0.05s ease;
+              }
+              .li-metric-card.is-expandable:hover {
+                border-color: rgba(56,189,248,0.45);
+                background: rgba(56,189,248,0.06);
+              }
+              .li-metric-card.is-expandable:focus
+--- CSS/fragment linkedinMetricDetailModal ---
+ "Escape") return;
+                const metricModal = document.getElementById("linkedinMetricDetailModal");
+                if (metricModal && metricModal.classList.contains("open")) {
+                  closeLinkedinMetricDetailModal();
+                  return;
+                }
+                if (linkedinCalendarModalDateKey) closeLinkedinCalendarDayModal();
+              });
+
+              let linkedinAnalysisIsOwnProfile = false;
+
+              const LINKEDIN_POST_TYPE_
+--- CSS/fragment pointer-events ---
+5%, rgba(56,189,248,0.18) 70%, transparent 100%);
+                opacity: 0.6; pointer-events: none; border-radius: 20px;
+                mask: linear-gradient(#000, transparent 60%);
+                -webkit-mask: linear-gradient(#000, transparent 60%);
+              }
+              .hero-top { display: flex; align-items: center; gap: 14px; }
+              .hero-icon {
+                width: 44px; height: 44px; border-radius: 12px;
+                background: linear-gradient

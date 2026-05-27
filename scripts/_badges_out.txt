@@ -1,0 +1,112 @@
+﻿
+--- Confian #1 at 117696 ---
+             <div class="header-badges">
+                      <span class="badge ${confCls}"><span class="dot"></span> Confianþa: ${escapeHtml(confidence)}</span>
+                      <span class="badge ${qCls}"><span class="dot"></span> Qualidade dados: ${escapeHtml(quality)}</span>
+                      ${methodBadge}
+                    </div>
+                  </div>
+                `;
+     
+Confian: 1 matches
+
+--- Qualidade #1 at 117816 ---
+Confianþa: ${escapeHtml(confidence)}</span>
+                      <span class="badge ${qCls}"><span class="dot"></span> Qualidade dados: ${escapeHtml(quality)}</span>
+                      ${methodBadge}
+                    </div>
+                  </div>
+                `;
+              }
+
+              function renderKpis(data) {
+                const profile = data.public_profile_data || {};
+  
+Qualidade: 1 matches
+
+--- renderHeader #1 at 115516 ---
+             return items.map(item => `<li>${escapeHtml(item)}</li>`).join("");
+              }
+
+              function renderHeader(data) {
+                const username = data.profile_username || "n/d";
+                const confidence = (data.confianca_analise || "baixa").toLowerCase();
+                const confCls = confidence === "alta" ? "ok" : (confidence === "media" ? "warn" : "bad");
+  
+
+--- renderHeader #2 at 177381 ---
+       const enrichment = profile.apify_enrichment || {};
+
+                  result.innerHTML = `
+                    ${renderHeader(data)}
+                    ${renderKpis(data)}
+                    ${renderTabs(autoAuthenticated)}
+
+                    <div id="panel-overview" class="panel active">
+                      <div class="section li-metrics-section">
+                        <h3>Indicado
+renderHeader: 2 matches
+
+--- li-profile-hero-stats #1 at 26339 ---
+-hero-avatar { margin: 0 auto; }
+                .li-profile-hero-actions { justify-content: center; }
+                .li-profile-hero-stats { justify-content: center; }
+              }
+              .li-profile-hero-avatar {
+                width: 112px; height: 112px; border-radius: 16px;
+                overflow: hidden; border: 2px solid rgba(255,255,255,0.12);
+                background: rgb
+
+--- li-profile-hero-stats #2 at 27605 ---
+size: 0.82rem; color: var(--muted-soft, var(--muted));
+                margin: 0 0 12px;
+              }
+              .li-profile-hero-stats {
+                display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px;
+              }
+              .li-profile-stat-pill {
+                background: rgba(255,255,255,0.06);
+                border: 1px solid var(--line);
+                border-r
+li-profile-hero-stats: 4 matches
+
+--- badge info #1 at 116807 ---
+         const methodBadge = method && String(method).toLowerCase().includes("apify")
+                  ? `<span class="badge info"><span class="dot"></span> Dados: Apify (posts p·blicos)</span>`
+                  : (method ? `<span class="badge"><span class="dot"></span> ${escapeHtml(String(method))}</span>` : "");
+
+                return `
+                  <div class="analysis-header">
+        
+
+--- badge info #2 at 178102 ---
+iew_data_source || (profile && profile.overview_source)) ? `<p class="section-desc" style="margin-top:6px"><span class="badge info"><span class="dot"></span> VisÒo geral: ${escapeHtml(String(data.overview_data_source || profile.overview_source || "harvestapi/linkedin-profile-scraper"))}</span></p>` : ""}
+                        <div class="li-metrics-group">
+                          ${renderLinke
+badge info: 2 matches
+
+--- data_quality #1 at 115899 ---
+arn" : "bad");
+                const profile = data.public_profile_data || {};
+                const quality = (profile.data_quality || "ù").toString();
+                const qCls = quality === "alta" ? "ok" : (quality === "media" ? "warn" : "bad");
+                const initial = escapeHtml(username.charAt(0).toUpperCase() || "?");
+                const headline = profile.headline ? String(profil
+data_quality: 1 matches
+
+--- confidence #1 at 115624 ---
+   function renderHeader(data) {
+                const username = data.profile_username || "n/d";
+                const confidence = (data.confianca_analise || "baixa").toLowerCase();
+                const confCls = confidence === "alta" ? "ok" : (confidence === "media" ? "warn" : "bad");
+                const profile = data.public_profile_data || {};
+                const quality = (profile.data_
+
+--- confidence #2 at 115720 ---
+;
+                const confidence = (data.confianca_analise || "baixa").toLowerCase();
+                const confCls = confidence === "alta" ? "ok" : (confidence === "media" ? "warn" : "bad");
+                const profile = data.public_profile_data || {};
+                const quality = (profile.data_quality || "ù").toString();
+                const qCls = quality === "alta" ? "ok" : (quality ==
+confidence: 4 matches

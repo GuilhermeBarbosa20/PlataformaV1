@@ -1,0 +1,100 @@
+function renderLinkedinPostsContainer() {
+                const el = document.getElementById("linkedinPostsContainer");
+                if (!el) return;
+                if (!linkedinGeneratedPosts.length) {
+                  el.innerHTML = '<div class="li-posts-loading">Sem posts. Clica «Gerar posts».</div>';
+                  return;
+                }
+                el.innerHTML = linkedinGeneratedPosts.map((p) => {
+                  const st = p.status || "draft";
+                  const cls = ["li-post-card", st === "approved" ? "approved" : "", st === "editing" ? "editing" : ""].filter(Boolean).join(" ");
+                  const statusLabel = st === "approved" ? '<span class="li-post-status ok">Aprovado</span>' : (st === "editing" ? '<span class="li-post-status">A editar</span>' : '<span class="li-post-status">Rascunho</span>');
+                  const bodyBlock = st === "editing"
+                    ? `<textarea class="li-post-edit-area" id="edit-area-${escapeHtml(p.id)}">${escapeHtml(p.bodyEdit != null ? p.bodyEdit : p.body)}</textarea>`
+                    : `<p class="li-post-body">${escapeHtml(p.body)}</p>`;
+                  const actions = st === "editing"
+                    ? `<button type="button" class="btn-post-ok" onclick="saveLinkedinPostEdit('${escapeHtml(p.id)}')">Guardar</button>
+                       <button type="button" class="btn-post-edit" onclick="cancelLinkedinPostEdit('${escapeHtml(p.id)}')">Cancelar</button>
+                       <button type="button" class="btn-post-del" onclick="deleteLinkedinPost('${escapeHtml(p.id)}')">Apagar</button>`
+                    : `<button type="button" class="btn-post-ok" onclick="approveLinkedinPost('${escapeHtml(p.id)}')" ${st === "approved" ? "disabled" : ""}>Aprovado</button>
+                       <button type="button" class="btn-post-edit" onclick="startLinkedinPostEdit('${escapeHtml(p.id)}')">Editar</button>
+                       <button type="button" class="btn-post-redo" onclick="regenerateLinkedinPost('${escapeHtml(p.id)}')">Refazer</button>`;
+                  const imgSt = p.image_status || "draft";
+                  let imageBlock = "";
+                  if (p.image_generating) {
+                    imageBlock = '<div class="li-post-image-loading">A gerar imagem…</div>';
+                  } else if (p.generated_image_url) {
+                    const imgStatusLabel = imgSt === "approved"
+                      ? '<span class="li-post-status ok">Imagem aprovada</span>'
+                      : '<span class="li-post-status">Imagem em rascunho</span>';
+                    const imgActions = imgSt === "approved"
+                      ? `<button type="button" class="btn-post-ok" disabled>Aprovado</button>`
+                      : `<button type="button" class="btn-post-ok" onclick="approveLinkedinPostImage('${escapeHtml(p.id)}')">Aprovado</button>
+                         <button type="button" class="btn-post-redo" onclick="regenerateLinkedinPostImage('${escapeHtml(p.id)}')">Refazer</button>`;
+                    imageBlock = `
+                      <div class="li-post-image-section">
+                        <div class="li-post-image-head">
+                          <span class="li-post-image-label">Imagem</span>
+                          ${imgStatusLabel}
+                        </div>
+                        <div class="li-post-image-wrap">
+                          <img src="${escapeHtml(p.generated_image_url)}" alt="Imagem do post" class="li-post-image" />
+                          <a class="li-post-image-link" href="${escapeHtml(p.generated_image_url)}" target="_blank" rel="noopener noreferrer">Abrir imagem</a>
+                        </div>
+                        <div class="li-post-image-actions">${imgActions}</div>
+                      </div>`;
+                  }
+                                    let publishBlock = "";
+                  const publishAuthOk = hasLinkedinPublishAuthorization();
+                  const publishAuthBtn = publishAuthOk
+                    ? '<span class="li-post-status ok" style="margin-left:8px">Publicação autorizada</span>'
+                    : '<button type="button" class="btn-post-publish secondary" onclick="connectLinkedinPublish()">Autorizar publicação no LinkedIn</button>';
+                  if (p.publishing_linkedin) {
+                    publishBlock = '<div class="li-post-publish-loading">A publicar no LinkedIn…</div>';
+                  } else if (p.published_on_linkedin) {
+                    publishBlock = '<div class="li-post-publish-section"><div class="li-post-published-msg">Publicado no LinkedIn</div></div>';
+                  } else if (st === "approved") {
+                    const canPublishImage = p.image_status === "approved" && p.generated_image_url;
+                    const pubDisabled = publishAuthOk ? "" : " disabled";
+                    if (canPublishImage) {
+                      publishBlock = `
+                        <div class="li-post-publish-section">
+                          <div class="li-post-publish-label">Publicar no LinkedIn ${publishAuthBtn}</div>
+                          <p style="font-size:0.78rem;color:var(--muted);margin:0 0 8px">O login Supabase analisa o perfil; autoriza aqui para publicar posts.</p>
+                          <div class="li-post-publish-actions">
+                            <button type="button" class="btn-post-publish" onclick="publishLinkedinPost('${escapeHtml(p.id)}', true)"${pubDisabled}>Publicar texto + imagem</button>
+                            <button type="button" class="btn-post-publish secondary" onclick="publishLinkedinPost('${escapeHtml(p.id)}', false)"${pubDisabled}>Publicar só texto</button>
+                          </div>
+                        </div>`;
+                    } else {
+                      publishBlock = `
+                        <div class="li-post-publish-section">
+                          <div class="li-post-publish-label">Publicar no LinkedIn ${publishAuthBtn}</div>
+                          <p style="font-size:0.78rem;color:var(--muted);margin:0 0 8px">O login Supabase analisa o perfil; autoriza aqui para publicar posts.</p>
+                          <div class="li-post-publish-actions">
+                            <button type="button" class="btn-post-publish" onclick="publishLinkedinPost('${escapeHtml(p.id)}', false)"${pubDisabled}>Publicar no LinkedIn</button>
+                          </div>
+                        </div>`;
+                    }
+                  }
+                  const cardCls = [cls, imgSt === "approved" && p.generated_image_url ? "image-approved" : ""].filter(Boolean).join(" ");
+                  return `
+                    <div class="${cardCls}" data-post-id="${escapeHtml(p.id)}">
+                      <div class="li-post-head">
+                        <span class="li-post-type">${escapeHtml(linkedinPostTypeLabel(p.content_type))}</span>
+                        ${statusLabel}
+                      </div>
+                      <h4 class="li-post-title">${escapeHtml(p.title || "")}</h4>
+                      ${bodyBlock}
+                      ${p.hook ? `<div class="li-post-meta"><strong>Gancho:</strong> ${escapeHtml(p.hook)}</div>` : ""}
+                      ${p.cta ? `<div class="li-post-meta"><strong>CTA:</strong> ${escapeHtml(p.cta)}</div>` : ""}
+                      ${imageBlock}
+                      ${p.angle ? `<div class="li-post-meta"><strong>Ângulo:</strong> ${escapeHtml(p.angle)}</div>` : ""}
+                      ${publishBlock}
+                      <div class="li-post-actions">${actions}</div>
+                    </div>
+                  `;
+                }).join("").replace(/<div/g, "<div").replace(/<\/div>/g, "</div>");
+              }
+
+              

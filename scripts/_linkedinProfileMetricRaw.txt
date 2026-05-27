@@ -1,0 +1,6 @@
+function linkedinProfileMetricRaw(obj, key) {
+                if (!obj || obj[key] === undefined || obj[key] === null) return null;
+                const v = String(obj[key]).trim();
+                if (!v || isMetricValueMissing(v)) return null;
+                return v;
+              }

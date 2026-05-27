@@ -1,0 +1,9 @@
+osts" data-action="generate-linkedin-posts" onclick="generateLinkedinPostsFromSnapshot()" disabled>Gerar posts</button>
+                      </div>
+                    </div>
+
+                    <div id="panel-calendar" class="panel">
+                      <div class="section" data-section="posts-calendario">
+                        <h3>Calendário semanal <span class="pill cool">LinkedIn</span></h3>
+                        <p style="color:var(--muted);font-size:0.85rem;margin:0 0 10px">Planeamento da semana a partir de hoje — um post por dia. Aprova texto, gera imagem e publica com o mesmo fluxo da aba Posts.</p>
+                        <div id="linkedinCalendarContainer" class="li-calendar-wrap"><div class="li-posts-loading">Clica em <strong>Gerar posts da semana</strong> para planear p

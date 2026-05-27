@@ -1,0 +1,23 @@
+﻿   </div>
+                            <div id="linkedinCalendarModalBody" class="li-cal-modal-body"></div>
+                          </div>
+                        </div>
+                        <div id="linkedinMetricDetailModal" class="li-metric-modal" aria-hidden="true" role="dialog" aria-labelledby="linkedinMetricDetailModalTitle">
+                          <div class="li-metric-modal-backdrop" onclick="closeLinkedinMetricDetailModal()"></div>
+                          <div class="li-metric-modal-panel" onclick="event.stopPropagation()">
+                            <div class="li-metric-modal-head">
+                              <h4 id="linkedinMetricDetailModalTitle">Detalhe</h4>
+                              <button type="button" class="li-metric-modal-close" onclick="closeLinkedinMetricDetailModal()" aria-label="Fechar">&times;</button>
+                            </div>
+                            <div id="linkedinMetricDetailModalBody" class="li-metric-modal-body"></div>
+                          </div>
+                        </div>
+                      </div>
+            
+
+autoAuth block starts 176014
+ternary end after modal 179680
+` : ""}
+
+                    <div id="panel-content" class="panel">
+            

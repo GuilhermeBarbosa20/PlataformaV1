@@ -1,0 +1,7 @@
+# SSL certificates placeholder
+# Place your SSL certificates in this directory for production:
+# - fullchain.pem (certificate + chain)
+# - privkey.pem (private key)
+#
+# You can obtain free certificates from Let's Encrypt using certbot:
+# certbot certonly --webroot -w /var/www/certbot -d your-domain.com

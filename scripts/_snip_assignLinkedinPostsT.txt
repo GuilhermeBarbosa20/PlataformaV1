@@ -1,0 +1,43 @@
+assignLinkedinPostsToWeek(posts) {
+                const weekDays = getLinkedinWeekDays();
+                return (posts || []).map((p, i) => ({
+                  ...p,
+                  scheduled_date: weekDays[i]
+                    ? formatLinkedinDateKey(weekDays[i])
+                    : (p.scheduled_date || formatLinkedinDateKey(weekDays[0])),
+                }));
+              }
+
+              function ensureLinkedinPostsWeekDates(scope) {
+                const list = getLinkedinPostsArray(scope || "calendar");
+                if (!list.length) return;
+                const weekDays = getLinkedinWeekDays();
+                let idx = 0;
+                list.forEach((p) => {
+                  if (!p.scheduled_date && weekDays[idx]) {
+                    p.scheduled_date = formatLinkedinDateKey(weekDays[idx]);
+                    idx += 1;
+                  }
+                });
+              }
+
+              function linkedinWeekTitle() {
+                const weekDays = getLinkedinWeekDays();
+                const months = ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"];
+                const start = weekDays[0];
+                const end = weekDays[6];
+                if (!start || !end) return "Semana actual";
+                const sameMonth = start.getMonth() === end.getMonth();
+                const range = sameMonth
+                  ? `${start.getDate()} – ${end.getDate()} ${months[start.getMonth()]} ${end.getFullYear()}`
+                  : `${start.getDate()} ${months[start.getMonth()]} – ${end.getDate()} ${months[end.getMonth()]} ${end.getFullYear()}`;
+                return `Planeamento semanal · ${range}`;
+              }
+
+              function refreshLinkedinPostsUI() {
+                renderLinkedinPostsContainer();
+                renderLinkedinCalendarContainer();
+              }
+
+              function renderLinkedinPostCardHtml(p, compact, scope) {
+                c

@@ -1,0 +1,158 @@
+async function approveLinkedinPost(id) {
+                const p = linkedinGeneratedPosts.find((x) => x.id === id);
+                if (!p || p.status === "approved") return;
+                p.status = "approved";
+                refreshLinkedinPostsUI();
+                const wantImage = confirm(
+                  "Queres gerar uma imagem para este post?\n\n" +
+                  "OK — gera uma imagem alinhada ao texto.\n" +
+                  "Cancelar — mantém só o texto aprovado."
+                );
+                if (!wantImage) return;
+                await linkedinGeneratePostImage(p, null);
+              }
+
+              async function linkedinGeneratePostImage(p, editInstructions) {
+                if (!p) return;
+                p.image_generating = true;
+                p.image_status = "draft";
+                refreshLinkedinPostsUI();
+                try {
+                  const resp = await fetch("/agents/linkedin/generate-post-image", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      post: {
+                        id: p.id,
+                        title: p.title,
+                        body: p.body,
+                        hook: p.hook,
+                        cta: p.cta,
+                        content_type: p.content_type,
+                      },
+                      edit_instructions: editInstructions || null,
+                    }),
+                  });
+                  const data = await resp.json().catch(() => ({}));
+                  if (!resp.ok) {
+                    const msg = data.detail || data.error || "Falha ao gerar imagem.";
+                    throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
+                  }
+                  p.generated_image_url = data.image_url || "";
+                  p.generated_image_prompt = data.prompt_used || "";
+                  p.image_status = "draft";
+                } catch (err) {
+                  alert(err && err.message ? err.message : "Não foi possível gerar a imagem.");
+                } finally {
+                  p.image_generating = false;
+                  refreshLinkedinPostsUI();
+                }
+              }
+
+              function approveLinkedinPostImage(id) {
+                const p = linkedinGeneratedPosts.find((x) => x.id === id);
+                if (!p || !p.generated_image_url || p.image_status === "approved") return;
+                p.image_status = "approved";
+                refreshLinkedinPostsUI();
+              }
+
+              
+              
+              function getPersistedLinkedinPublishToken() {
+                try {
+                  const exp = Number(sessionStorage.getItem(LINKEDIN_PUBLISH_EXPIRES_KEY) || 0);
+                  if (exp && Date.now() > exp) {
+                    sessionStorage.removeItem(LINKEDIN_PUBLISH_TOKEN_KEY);
+                    sessionStorage.removeItem(LINKEDIN_PUBLISH_URN_KEY);
+                    sessionStorage.removeItem(LINKEDIN_PUBLISH_EXPIRES_KEY);
+                    return null;
+                  }
+                  return sessionStorage.getItem(LINKEDIN_PUBLISH_TOKEN_KEY) || null;
+                } catch (e) {
+                  return null;
+                }
+              }
+
+              function hasLinkedinPublishAuthorization() {
+                return Boolean(getPersistedLinkedinPublishToken());
+              }
+
+              function connectLinkedinPublish() {
+                window.location.href = "/agents/linkedin/connect-publish";
+              }
+
+              (function handlePublishOAuthReturn() {
+                try {
+                  const q = new URLSearchParams(window.location.search);
+                  if (q.get("publish_connected") === "1") {
+                    history.replaceState({}, "", window.location.pathname);
+                  }
+                } catch (e) {}
+              })();
+
+async function publishLinkedinPost(id, includeImage) {
+                const p = linkedinGeneratedPosts.find((x) => x.id === id);
+                if (!p || p.status !== "approved" || p.published_on_linkedin) return;
+                if (includeImage && (!p.generated_image_url || p.image_status !== "approved")) {
+                  alert("Aprova a imagem antes de publicar com imagem.");
+                  return;
+                }
+                const modeLabel = includeImage ? "texto + imagem" : "só texto";
+                if (!confirm("Publicar no LinkedIn (" + modeLabel + ")?\n\nSerá usada a conta com que fizeste login.")) return;
+                const ctx = await getLinkedinSupabaseSession();
+                if (!ctx || !ctx.session) {
+                  alert("Inicia sessão com LinkedIn para publicar.");
+                  return;
+                }
+                const publishTok = getPersistedLinkedinPublishToken();
+                if (!publishTok) {
+                  alert("Primeiro clica em «Autorizar publicação no LinkedIn» na secção Publicar.");
+                  return;
+                }
+                const payload = appendLinkedinSessionFields({
+                  include_image: !!includeImage,
+                  linkedin_publish_access_token: publishTok,
+                  post: {
+                    id: p.id,
+                    title: p.title,
+                    body: p.body,
+                    hook: p.hook,
+                    cta: p.cta,
+                    content_type: p.content_type,
+                    generated_image_url: p.generated_image_url || null,
+                    status: p.status,
+                    image_status: p.image_status || null,
+                  },
+                }, ctx.session);
+                p.publishing_linkedin = true;
+                refreshLinkedinPostsUI();
+                try {
+                  const resp = await fetch("/agents/linkedin/publish-post", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(payload),
+                  });
+                  const data = await resp.json().catch(() => ({}));
+                  if (!resp.ok) {
+                    const msg = data.detail || data.error || "Falha ao publicar.";
+                    throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
+                  }
+                  p.published_on_linkedin = true;
+                  p.linkedin_post_urn = data.linkedin_post_urn || "";
+                  p.published_with_image = !!data.published_with_image;
+                } catch (err) {
+                  alert(err && err.message ? err.message : "Não foi possível publicar no LinkedIn.");
+                } finally {
+                  p.publishing_linkedin = false;
+                  refreshLinkedinPostsUI();
+                }
+              }
+
+async function regenerateLinkedinPostImage(id) {
+                const p = linkedinGeneratedPosts.find((x) => x.id === id);
+                if (!p || !p.generated_image_url) return;
+                const instr = window.prompt("Instruções para refazer a imagem (opcional):", "") || "";
+                await linkedinGeneratePostImage(p, instr || null);
+              }
+
+              

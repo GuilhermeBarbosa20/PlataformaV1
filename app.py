@@ -29,6 +29,17 @@ from agents.linkedin_oauth import (
     linkedin_oauth_configured,
     pop_oauth_state,
 )
+from agents.linkedin_calendar_db import (
+    fetch_user_linkedin_calendar_posts_from_database,
+    normalize_calendar_posts_for_storage,
+    upsert_user_linkedin_calendar_posts_to_database,
+)
+from agents.linkedin_publish_auth_db import (
+    fetch_user_linkedin_publish_oauth_from_database,
+    publish_oauth_status_for_client,
+    upsert_user_linkedin_publish_oauth_to_database,
+)
+from agents.linkedin_harvest_profile import apply_linkedin_harvest_overview_to_analysis
 from agents.linkedin_publish import (
     format_linkedin_post_text,
     get_linkedin_person_urn,
@@ -614,6 +625,30 @@ class LinkedInStoredProfileRequest(BaseModel):
     display_name: Optional[str] = Field(None, max_length=200)
 
 
+class LinkedInCalendarPostsLoadRequest(BaseModel):
+    """Pedido para carregar posts do calendário semanal guardados na BD.
+
+    Argumentos:
+        supabase_access_token: JWT da sessão Supabase (obrigatório).
+    """
+
+    supabase_access_token: str = Field(..., min_length=20)
+
+
+class LinkedInCalendarPostsSaveRequest(BaseModel):
+    """Pedido para gravar posts do calendário semanal na BD.
+
+    Argumentos:
+        supabase_access_token: JWT da sessão.
+        posts: Lista de posts do calendário (estado actual).
+        week_start: Data ISO do primeiro dia da semana (opcional).
+    """
+
+    supabase_access_token: str = Field(..., min_length=20)
+    posts: List[Dict[str, Any]] = Field(default_factory=list)
+    week_start: Optional[str] = Field(None, max_length=10)
+
+
 class LinkedInGeneratePostsRequest(BaseModel):
     """Pedido para gerar posts LinkedIn a partir de uma análise de perfil.
 
@@ -621,14 +656,14 @@ class LinkedInGeneratePostsRequest(BaseModel):
         analysis: Resultado JSON da análise (tab Visão Geral / Ações).
         public_profile_data: Dados Apify do perfil (opcional).
         profile_url: URL do perfil analisado.
-        count: Quantidade de posts (1–6).
+        count: Quantidade de posts (1–7).
         language: Idioma dos textos.
     """
 
     analysis: Dict[str, Any] = Field(default_factory=dict)
     public_profile_data: Optional[Dict[str, Any]] = Field(None)
     profile_url: Optional[str] = Field(None, max_length=4000)
-    count: int = Field(3, ge=1, le=6)
+    count: int = Field(3, ge=1, le=7)
     language: str = Field("pt-PT", min_length=2)
 
 
@@ -688,6 +723,38 @@ class LinkedInPublishPostRequest(BaseModel):
     post: Dict[str, Any] = Field(default_factory=dict)
     include_image: bool = False
     visibility: str = Field("PUBLIC", min_length=3, max_length=20)
+
+
+class LinkedInPublishAuthStoreRequest(BaseModel):
+    """Pedido para guardar autorização OAuth de publicação LinkedIn na Supabase.
+
+    Argumentos:
+        supabase_access_token: JWT da sessão Supabase do utilizador.
+        linkedin_publish_access_token: Access token com ``w_member_social``.
+        linkedin_person_urn: URN do membro LinkedIn (opcional).
+        expires_in: Segundos até expirar (opcional).
+
+    Retorno:
+        Usado em ``POST /agents/linkedin/publish-auth/store`` (sem corpo de resposta complexo).
+    """
+
+    supabase_access_token: str = Field(..., min_length=20)
+    linkedin_publish_access_token: str = Field(..., min_length=20)
+    linkedin_person_urn: Optional[str] = None
+    expires_in: Optional[int] = Field(None, ge=60)
+
+
+class LinkedInPublishAuthStatusRequest(BaseModel):
+    """Pedido para verificar se o utilizador já autorizou publicação no LinkedIn.
+
+    Argumentos:
+        supabase_access_token: JWT da sessão Supabase.
+
+    Retorno:
+        Usado em ``POST /agents/linkedin/publish-auth/status``.
+    """
+
+    supabase_access_token: str = Field(..., min_length=20)
 
 
 class SocialMediaUnifiedAnalysisRequest(BaseModel):
@@ -751,9 +818,32 @@ class MarketingDirector:
                 "oauth linkedin",
                 "login linkedin",
                 "perfil linkedin",
+                "perfis linkedin",
                 "analise linkedin",
+                "analisar perfil linkedin",
+                "analisar perfis linkedin",
+                "analise de perfil linkedin",
+                "auditoria linkedin",
+                "auditar perfil linkedin",
+                "visao geral linkedin",
+                "indicadores linkedin",
+                "metricas linkedin",
+                "publicacoes linkedin",
+                "posts linkedin",
+                "calendario linkedin",
+                "empresa linkedin",
+                "pagina empresa linkedin",
+                "company linkedin",
+                "linkedin.com/in/",
+                "linkedin.com/company/",
+                "ssi linkedin",
+                "seguidores linkedin",
+                "harvest linkedin",
+                "scraper linkedin",
                 "linkedin oidc",
                 "sign in linkedin",
+                "conectar linkedin",
+                "ligar linkedin",
             ],
             "Agente Meta Ads": [
                 "meta ads",
@@ -766,11 +856,14 @@ class MarketingDirector:
             ],
             "Agente Linkedin Ads": [
                 "linkedin ads",
-                "linkedin",
                 "anuncios linkedin",
+                "anuncio linkedin",
                 "linkedin sponsorizado",
                 "sponsored linkedin",
                 "campanha linkedin",
+                "campanhas linkedin",
+                "lead gen linkedin",
+                "linkedin b2b ads",
             ],
             "Agente Google Ads": [
                 "google ads",
@@ -948,6 +1041,7 @@ class MarketingDirector:
         ai_decision = self._route_with_ai(user_input)
         if ai_decision:
             selected_agent, rationale = ai_decision
+            selected_agent = self._correct_agent_for_linkedin_intent(user_input, selected_agent)
             return self._build_agent_result(selected_agent, user_input, score=10, rationale=rationale)
 
         normalized = self._normalize_text(user_input)
@@ -1051,7 +1145,171 @@ class MarketingDirector:
 
         if selected_agent not in self._agent_catalog:
             return None
+        selected_agent = self._correct_agent_for_linkedin_intent(user_input, selected_agent)
         return selected_agent, str(rationale)
+
+    def _linkedin_routing_guidance(self) -> str:
+        """Texto de regras para desambiguar pedidos LinkedIn nos prompts do Diretor.
+
+        Centraliza instruções sobre quando encaminhar para análise de perfil
+        orgânico (`Agente LinkedIn (perfil)`) versus campanhas pagas
+        (`Agente Linkedin Ads`) ou gestão de outras redes (`Agente Redes sociais`).
+
+        Argumentos:
+            Nenhum.
+
+        Retorno:
+            Bloco de texto em português para injetar em prompts de sistema.
+        """
+
+        return (
+            "REGRAS LINKEDIN (obrigatório): "
+            "Usa «Agente LinkedIn (perfil)» quando o pedido for analisar/auditar perfil pessoal "
+            "ou página de empresa no LinkedIn, métricas orgânicas (seguidores, SSI, publicações), "
+            "login OAuth Supabase, URL linkedin.com/in/ ou linkedin.com/company/, calendário de posts "
+            "LinkedIn ou recomendações de IA sobre presença no perfil. "
+            "Usa «Agente Linkedin Ads» apenas para campanhas pagas, sponsored content, lead gen B2B "
+            "ou orçamento de anúncios no LinkedIn — não para análise de perfil orgânico. "
+            "Usa «Agente Redes sociais» para Instagram, TikTok, Reels, stories e calendário editorial "
+            "fora do LinkedIn; não uses para análise de perfil LinkedIn."
+        )
+
+    def _is_linkedin_ads_intent(self, normalized: str) -> bool:
+        """Deteta pedidos de publicidade paga no LinkedIn.
+
+        Argumentos:
+            normalized: Texto do utilizador já normalizado (sem acentos, minúsculas).
+
+        Retorno:
+            `True` quando o pedido aponta para campanhas/ads LinkedIn, não perfil orgânico.
+        """
+
+        ads_markers = (
+            "linkedin ads",
+            "anuncios linkedin",
+            "anuncio linkedin",
+            "campanha linkedin",
+            "campanhas linkedin",
+            "sponsorizado",
+            "sponsored linkedin",
+            "lead gen linkedin",
+            "linkedin b2b ads",
+            "orcamento linkedin",
+            "cpc linkedin",
+            "cpl linkedin",
+        )
+        return any(marker in normalized for marker in ads_markers)
+
+    def _is_linkedin_profile_intent(self, normalized: str) -> bool:
+        """Deteta pedidos de análise, auditoria ou gestão de perfil LinkedIn orgânico.
+
+        Argumentos:
+            normalized: Texto do utilizador já normalizado.
+
+        Retorno:
+            `True` quando o pedido é sobre perfil, métricas orgânicas ou OAuth LinkedIn.
+        """
+
+        if self._is_linkedin_ads_intent(normalized):
+            return False
+        profile_markers = (
+            "perfil linkedin",
+            "perfis linkedin",
+            "linkedin perfil",
+            "analise linkedin",
+            "analisar perfil",
+            "analise de perfil",
+            "auditoria linkedin",
+            "auditar perfil",
+            "visao geral linkedin",
+            "indicadores linkedin",
+            "metricas linkedin",
+            "publicacoes linkedin",
+            "posts linkedin",
+            "calendario linkedin",
+            "empresa linkedin",
+            "pagina empresa linkedin",
+            "company linkedin",
+            "ssi linkedin",
+            "seguidores linkedin",
+            "oauth linkedin",
+            "login linkedin",
+            "linkedin supabase",
+            "linkedin oidc",
+            "sign in linkedin",
+            "conectar linkedin",
+            "ligar linkedin",
+            "linkedin.com/in/",
+            "linkedin.com/company/",
+        )
+        if any(marker in normalized for marker in profile_markers):
+            return True
+        if "linkedin" in normalized and any(
+            word in normalized
+            for word in (
+                "perfil",
+                "perfis",
+                "analis",
+                "auditor",
+                "metric",
+                "indicad",
+                "seguidor",
+                "publicac",
+                "post",
+                "calend",
+                "ssi",
+                "empresa",
+                "company",
+                "oauth",
+                "login",
+                "supabase",
+            )
+        ):
+            return True
+        return False
+
+    def _resolve_linkedin_routing(self, normalized: str) -> Optional[Tuple[str, int]]:
+        """Desambigua pedidos LinkedIn antes do scoring genérico por keywords.
+
+        Argumentos:
+            normalized: Texto do utilizador normalizado.
+
+        Retorno:
+            Tuplo `(agent_name, score)` quando a intenção LinkedIn é clara;
+            `None` quando não há sinal suficiente de perfil ou ads LinkedIn.
+        """
+
+        if self._is_linkedin_ads_intent(normalized):
+            return "Agente Linkedin Ads", 5
+        if self._is_linkedin_profile_intent(normalized):
+            return "Agente LinkedIn (perfil)", 5
+        return None
+
+    def _correct_agent_for_linkedin_intent(self, user_input: str, selected_agent: str) -> str:
+        """Corrige escolhas da IA que confundem perfil LinkedIn com ads ou redes sociais.
+
+        Argumentos:
+            user_input: Pedido original do utilizador.
+            selected_agent: Agente devolvido pelo roteador (IA ou keywords).
+
+        Retorno:
+            Nome do agente corrigido quando o pedido é claramente de perfil LinkedIn.
+        """
+
+        normalized = self._normalize_text(user_input)
+        if not self._is_linkedin_profile_intent(normalized):
+            return selected_agent
+        if self._is_linkedin_ads_intent(normalized):
+            return selected_agent
+        wrong_agents = {
+            "Agente Linkedin Ads",
+            "Agente Redes sociais",
+            "Agente Copywriter",
+            "Agente Analista de Score",
+        }
+        if selected_agent in wrong_agents:
+            return "Agente LinkedIn (perfil)"
+        return selected_agent
 
     def generate_chat_reply(self, messages: List[Dict[str, str]], language: str = "pt-PT") -> Dict[str, object]:
         """Gera resposta do Diretor e estado de encaminhamento na chatroom.
@@ -1096,6 +1354,9 @@ class MarketingDirector:
             "e em `reply` diz só que o utilizador deve clicar em «Encaminhar para o agente». "
             "Quando já tiveres contexto suficiente para encaminhar, escolhe exatamente um agente da lista. "
             f"Agentes permitidos: {allowed_agents}. "
+            f"{self._linkedin_routing_guidance()} "
+            "Se o utilizador quiser analisar perfil(s) LinkedIn, define logo "
+            "`ready_to_route` como true e `agent_name` como `Agente LinkedIn (perfil)`. "
             "O campo `reply` deve ter no máximo cerca de 3 frases curtas. "
             "Responde APENAS com JSON válido no formato: "
             '{"reply":"<resposta ao utilizador>","ready_to_route":true|false,"agent_name":"<agente permitido ou vazio>"}'
@@ -1134,6 +1395,13 @@ class MarketingDirector:
         ready_to_route = bool(data.get("ready_to_route", False))
         raw_agent_name = str(data.get("agent_name", "")).strip()
         agent_name = raw_agent_name if raw_agent_name in self._agent_catalog else None
+        if ready_to_route and agent_name:
+            last_user_msg = next(
+                (m for m in reversed(sanitized_messages) if m.get("role") == "user"),
+                None,
+            )
+            last_user_text = str(last_user_msg.get("content", "")) if last_user_msg else ""
+            agent_name = self._correct_agent_for_linkedin_intent(last_user_text, agent_name)
         if ready_to_route and not agent_name:
             ready_to_route = False
 
@@ -1206,6 +1474,18 @@ class MarketingDirector:
             return None
 
         normalized = self._normalize_text(raw)
+        linkedin_route = self._resolve_linkedin_routing(normalized)
+        if linkedin_route is not None:
+            linkedin_agent, _ = linkedin_route
+            return {
+                "reply": (
+                    f"Para análise e gestão de perfil LinkedIn, o especialista certo é o {linkedin_agent}. "
+                    "Clica em «Encaminhar para o agente» para continuares na página dedicada."
+                ),
+                "ready_to_route": True,
+                "agent_name": linkedin_agent,
+            }
+
         keyword_agent, score = self._select_agent(normalized)
         if score >= 1:
             return {
@@ -1396,6 +1676,7 @@ class MarketingDirector:
 
         if selected_agent not in self._agent_catalog:
             return None
+        selected_agent = self._correct_agent_for_linkedin_intent(user_input, selected_agent)
         return selected_agent, str(rationale)
 
     def _build_router_system_prompt(self) -> str:
@@ -1416,6 +1697,7 @@ class MarketingDirector:
         return (
             "És um Diretor de Marketing AI que escolhe exatamente um agente especializado. "
             f"Agentes permitidos: {allowed_agents}. "
+            f"{self._linkedin_routing_guidance()} "
             "Responde apenas com JSON válido no formato: "
             '{"agent_name":"<um dos agentes permitidos>","rationale":"<explicação curta>"}'
         )
@@ -1435,6 +1717,10 @@ class MarketingDirector:
             Tuplo `(nome_do_agente, pontuacao)` com o agente escolhido e o nível
             de confiança simples baseado na contagem de palavras-chave.
         """
+
+        linkedin_route = self._resolve_linkedin_routing(normalized_input)
+        if linkedin_route is not None:
+            return linkedin_route
 
         first_agent = next(iter(self.routing_map))
         best_agent = first_agent
@@ -2222,6 +2508,149 @@ def linkedin_stored_profile(payload: LinkedInStoredProfileRequest) -> Dict[str, 
     return {"profile_url": db_url, "from_database": True, "saved_to_database": False, "ok": True}
 
 
+def _linkedin_calendar_posts_from_database(access_token: str) -> Optional[Dict[str, Any]]:
+    """Lê posts do calendário LinkedIn na Supabase para a sessão actual.
+
+    Argumentos:
+        access_token: JWT ``access_token`` Supabase.
+
+    Retorno:
+        Dict com ``week_start`` e ``posts``, ou ``None``.
+    """
+
+    sup_url, sup_anon = get_supabase_public_credentials()
+    if not access_token or not sup_url or not sup_anon:
+        return None
+    try:
+        return fetch_user_linkedin_calendar_posts_from_database(access_token, sup_url, sup_anon)
+    except (error.HTTPError, error.URLError, OSError, json.JSONDecodeError, TypeError):
+        return None
+
+
+def _save_linkedin_calendar_posts_to_database(
+    access_token: str,
+    user: Dict[str, Any],
+    posts: List[Dict[str, Any]],
+    *,
+    week_start: Optional[str] = None,
+) -> bool:
+    """Persiste posts do calendário semanal na Supabase.
+
+    Argumentos:
+        access_token: JWT da sessão.
+        user: Utilizador GoTrue.
+        posts: Lista de posts.
+        week_start: Primeiro dia da semana (ISO).
+
+    Retorno:
+        ``True`` se gravado com sucesso.
+    """
+
+    sup_url, sup_anon = get_supabase_public_credentials()
+    uid = str((user or {}).get("id") or "").strip()
+    if not access_token or not sup_url or not sup_anon or not uid:
+        return False
+    cleaned = normalize_calendar_posts_for_storage(posts)
+    try:
+        return upsert_user_linkedin_calendar_posts_to_database(
+            access_token,
+            sup_url,
+            sup_anon,
+            uid,
+            cleaned,
+            week_start=week_start,
+        )
+    except (error.HTTPError, error.URLError, OSError, TypeError):
+        return False
+
+
+@app.post("/agents/linkedin/calendar-posts/load")
+def linkedin_calendar_posts_load(payload: LinkedInCalendarPostsLoadRequest) -> Dict[str, Any]:
+    """Carrega posts do calendário semanal guardados para o utilizador autenticado.
+
+    Argumentos:
+        payload: Token de sessão Supabase.
+
+    Retorno:
+        ``posts``, ``week_start``, ``found``, ``count``.
+
+    Raises:
+        HTTPException: 401 sessão inválida.
+    """
+
+    sup_url, sup_anon = get_supabase_public_credentials()
+    if not sup_url or not sup_anon:
+        raise HTTPException(
+            status_code=503,
+            detail="SUPABASE_URL / SUPABASE_ANON_KEY não configurados no servidor.",
+        )
+    access_tok = payload.supabase_access_token.strip()
+    try:
+        fetch_supabase_auth_user(access_tok, sup_url, sup_anon)
+    except error.HTTPError as exc:
+        raise HTTPException(status_code=401, detail="Sessão Supabase inválida ou expirada.") from exc
+    except (error.URLError, OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=502, detail=f"Erro ao validar sessão: {exc!s}") from exc
+
+    row = _linkedin_calendar_posts_from_database(access_tok)
+    if not row:
+        return {"found": False, "posts": [], "week_start": None, "count": 0}
+    posts = row.get("posts") if isinstance(row.get("posts"), list) else []
+    return {
+        "found": len(posts) > 0,
+        "posts": posts,
+        "week_start": row.get("week_start"),
+        "count": len(posts),
+    }
+
+
+@app.post("/agents/linkedin/calendar-posts/save")
+def linkedin_calendar_posts_save(payload: LinkedInCalendarPostsSaveRequest) -> Dict[str, Any]:
+    """Grava posts do calendário semanal na base de dados Supabase.
+
+    Argumentos:
+        payload: Token, lista de posts e opcionalmente ``week_start``.
+
+    Retorno:
+        ``ok``, ``saved_to_database``, ``count``.
+
+    Raises:
+        HTTPException: 401 sessão inválida; 502 falha ao gravar.
+    """
+
+    sup_url, sup_anon = get_supabase_public_credentials()
+    if not sup_url or not sup_anon:
+        raise HTTPException(
+            status_code=503,
+            detail="SUPABASE_URL / SUPABASE_ANON_KEY não configurados no servidor.",
+        )
+    access_tok = payload.supabase_access_token.strip()
+    try:
+        user = fetch_supabase_auth_user(access_tok, sup_url, sup_anon)
+    except error.HTTPError as exc:
+        raise HTTPException(status_code=401, detail="Sessão Supabase inválida ou expirada.") from exc
+    except (error.URLError, OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=502, detail=f"Erro ao validar sessão: {exc!s}") from exc
+
+    posts = payload.posts if isinstance(payload.posts, list) else []
+    saved = _save_linkedin_calendar_posts_to_database(
+        access_tok,
+        user,
+        posts,
+        week_start=payload.week_start,
+    )
+    if not saved:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Não foi possível guardar o calendário na base de dados. "
+                "Executa migrations/003_user_linkedin_calendar_posts.sql no Supabase."
+            ),
+        )
+    cleaned = normalize_calendar_posts_for_storage(posts)
+    return {"ok": True, "saved_to_database": True, "count": len(cleaned)}
+
+
 @app.post("/agents/linkedin/generate-posts")
 def linkedin_generate_posts(payload: LinkedInGeneratePostsRequest) -> Dict[str, Any]:
     """Gera posts LinkedIn prontos a publicar com base na análise do perfil.
@@ -2346,7 +2775,10 @@ def linkedin_generate_post_image(payload: LinkedInGeneratePostImageRequest) -> D
 
 
 @app.get("/agents/linkedin/connect-publish")
-def linkedin_connect_publish(request: Request) -> RedirectResponse:
+def linkedin_connect_publish(
+    request: Request,
+    return_path: Optional[str] = None,
+) -> RedirectResponse:
     """Inicia OAuth LinkedIn com ``w_member_social`` para publicar posts.
 
     O login Supabase (OIDC) não inclui permissão ``ugcPosts.CREATE``; este
@@ -2354,6 +2786,8 @@ def linkedin_connect_publish(request: Request) -> RedirectResponse:
 
     Argumentos:
         request: Pedido HTTP (usa ``base_url`` para o redirect_uri).
+        return_path: Caminho relativo para redirecionar após sucesso (ex. página
+            do calendário com ``?cal_day=...``).
 
     Retorno:
         Redireccionamento para a página de autorização do LinkedIn.
@@ -2367,9 +2801,12 @@ def linkedin_connect_publish(request: Request) -> RedirectResponse:
             status_code=503,
             detail="Define LINKEDIN_CLIENT_ID e LINKEDIN_CLIENT_SECRET no .env.",
         )
+    rp = (return_path or "/agentes/linkedin-perfil").strip()
+    if not rp.startswith("/") or "://" in rp:
+        rp = "/agentes/linkedin-perfil"
     base = str(request.base_url).rstrip("/")
     try:
-        url = create_publish_authorization_url(base_url=base)
+        url = create_publish_authorization_url(base_url=base, return_path=rp)
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return RedirectResponse(url=url, status_code=302)
@@ -2507,6 +2944,93 @@ def _linkedin_publish_callback_html(
 </body></html>"""
 
 
+@app.post("/agents/linkedin/publish-auth/store")
+def linkedin_publish_auth_store(payload: LinkedInPublishAuthStoreRequest) -> Dict[str, Any]:
+    """Persiste a autorização OAuth de publicação LinkedIn do utilizador na Supabase.
+
+    Chamado pelo browser após o callback OAuth, para não repetir o fluxo em cada
+    publicação. O token fica associado ao ``user_id`` da sessão Supabase.
+
+    Argumentos:
+        payload: Sessão Supabase e token de publicação LinkedIn.
+
+    Retorno:
+        ``{"success": true}`` quando gravado com sucesso.
+
+    Raises:
+        HTTPException: 401 sessão inválida; 502 falha ao gravar.
+    """
+
+    sup_url, sup_anon = get_supabase_public_credentials()
+    if not sup_url or not sup_anon:
+        raise HTTPException(
+            status_code=503,
+            detail="SUPABASE_URL / SUPABASE_ANON_KEY não configurados no servidor.",
+        )
+    access_tok = payload.supabase_access_token.strip()
+    try:
+        user = fetch_supabase_auth_user(access_tok, sup_url, sup_anon)
+    except error.HTTPError as exc:
+        raise HTTPException(status_code=401, detail="Sessão Supabase inválida ou expirada.") from exc
+    except (error.URLError, OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=502, detail=f"Erro ao validar sessão: {exc!s}") from exc
+
+    uid = str(user.get("id") or "").strip()
+    if not uid:
+        raise HTTPException(status_code=401, detail="Utilizador Supabase sem ID.")
+
+    ok = upsert_user_linkedin_publish_oauth_to_database(
+        access_tok,
+        sup_url,
+        sup_anon,
+        uid,
+        linkedin_access_token=payload.linkedin_publish_access_token.strip(),
+        linkedin_person_urn=(payload.linkedin_person_urn or "").strip() or None,
+        expires_in=payload.expires_in,
+    )
+    if not ok:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Não foi possível guardar a autorização. Executa a migration "
+                "migrations/004_user_linkedin_publish_oauth.sql no Supabase."
+            ),
+        )
+    return {"success": True}
+
+
+@app.post("/agents/linkedin/publish-auth/status")
+def linkedin_publish_auth_status(payload: LinkedInPublishAuthStatusRequest) -> Dict[str, Any]:
+    """Indica se o utilizador já autorizou publicação no LinkedIn (sem expor o token).
+
+    Argumentos:
+        payload: JWT da sessão Supabase.
+
+    Retorno:
+        ``{"authorized": bool, "expires_at": ..., "authorized_at": ...}``.
+
+    Raises:
+        HTTPException: 401 sessão inválida.
+    """
+
+    sup_url, sup_anon = get_supabase_public_credentials()
+    if not sup_url or not sup_anon:
+        raise HTTPException(
+            status_code=503,
+            detail="SUPABASE_URL / SUPABASE_ANON_KEY não configurados no servidor.",
+        )
+    access_tok = payload.supabase_access_token.strip()
+    try:
+        fetch_supabase_auth_user(access_tok, sup_url, sup_anon)
+    except error.HTTPError as exc:
+        raise HTTPException(status_code=401, detail="Sessão Supabase inválida ou expirada.") from exc
+    except (error.URLError, OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=502, detail=f"Erro ao validar sessão: {exc!s}") from exc
+
+    row = fetch_user_linkedin_publish_oauth_from_database(access_tok, sup_url, sup_anon)
+    return publish_oauth_status_for_client(row)
+
+
 @app.post("/agents/linkedin/publish-post")
 def linkedin_publish_post(payload: LinkedInPublishPostRequest) -> Dict[str, Any]:
     """Publica no LinkedIn o texto aprovado (e opcionalmente a imagem aprovada).
@@ -2532,13 +3056,18 @@ def linkedin_publish_post(payload: LinkedInPublishPostRequest) -> Dict[str, Any]
         )
     access_tok = payload.supabase_access_token.strip()
     try:
-        fetch_supabase_auth_user(access_tok, sup_url, sup_anon)
+        user = fetch_supabase_auth_user(access_tok, sup_url, sup_anon)
     except error.HTTPError as exc:
         raise HTTPException(status_code=401, detail="Sessão Supabase inválida ou expirada.") from exc
     except (error.URLError, OSError, json.JSONDecodeError) as exc:
         raise HTTPException(status_code=502, detail=f"Erro ao validar sessão: {exc!s}") from exc
 
-    publish_tok = (payload.linkedin_publish_access_token or "").strip()
+    oauth_row = fetch_user_linkedin_publish_oauth_from_database(access_tok, sup_url, sup_anon)
+    publish_tok = ""
+    if oauth_row:
+        publish_tok = str(oauth_row.get("linkedin_access_token") or "").strip()
+    if not publish_tok:
+        publish_tok = (payload.linkedin_publish_access_token or "").strip()
     if not publish_tok:
         raise HTTPException(
             status_code=401,
@@ -2550,6 +3079,9 @@ def linkedin_publish_post(payload: LinkedInPublishPostRequest) -> Dict[str, Any]
     access_token_for_api = publish_tok
 
     post = payload.post if isinstance(payload.post, dict) else {}
+    post_id = str(post.get("id") or "").strip()
+    if not post_id:
+        raise HTTPException(status_code=422, detail="Identificador do post em falta.")
     text = format_linkedin_post_text(post)
     if not text or text == "(sem texto)":
         raise HTTPException(status_code=422, detail="O post não tem texto aprovado para publicar.")
@@ -2590,6 +3122,7 @@ def linkedin_publish_post(payload: LinkedInPublishPostRequest) -> Dict[str, Any]
         "success": True,
         "linkedin_post_urn": result.get("linkedin_post_urn"),
         "published_with_image": bool(image_url),
+        "post_id": post_id,
     }
 
 
@@ -2811,6 +3344,13 @@ def social_media_profile_analyze(payload: SocialMediaProfileAnalysisRequest) -> 
             public_profile_data,
             profile_url=profile_url,
         )
+        response = apply_linkedin_harvest_overview_to_analysis(
+            response,
+            public_profile_data,
+            profile_url=profile_url,
+        )
+        if isinstance(public_profile_data, dict) and public_profile_data.get("overview_source"):
+            response["overview_data_source"] = public_profile_data.get("overview_source")
         response["source"] = "social-media-linkedin-apify" if apify_token else "social-media-linkedin-public"
         response["plataforma"] = pl
         response["plataforma_label"] = social_platform_label_pt(pl)
@@ -4346,8 +4886,27 @@ def _linkedin_profile_url_from_supabase_user(user: Dict[str, Any]) -> Optional[s
         return None
 
 
+def _linkedin_harvest_profile_scraper_actor() -> str:
+    """Actor Apify para a Visão Geral (perfil detalhado sem cookies).
+
+    Argumentos:
+        Nenhum.
+
+    Retorno:
+        Identificador do actor (por defeito ``harvestapi/linkedin-profile-scraper``).
+    """
+
+    return os.getenv(
+        "APIFY_LINKEDIN_PROFILE_SCRAPER_ACTOR",
+        "harvestapi/linkedin-profile-scraper",
+    ).strip()
+
+
 def _map_apify_linkedin_profile_record(first: Dict[str, Any], source_url: str) -> Dict[str, Any]:
     """Converte um registo do actor Apify LinkedIn para o formato interno de perfil.
+
+    Suporta o formato ``harvestapi/linkedin-profile-scraper`` (``connectionsCount``,
+    ``experience``, ``education``, etc.) e formatos genéricos de profile scraper.
 
     Argumentos:
         first: Primeiro item do dataset Apify (dicionário).
@@ -4355,12 +4914,16 @@ def _map_apify_linkedin_profile_record(first: Dict[str, Any], source_url: str) -
 
     Retorno:
         Dicionário alinhado com o usado em ``profile-analyze`` / UI (seguidores,
-        headline, ``apify_enrichment`` quando há posts).
+        headline, ``harvest_profile`` bruto, ``apify_enrichment`` quando há posts).
     """
 
     followers = first.get("followerCount")
     if followers is None:
         followers = first.get("followers_count") or first.get("followers")
+
+    connections = first.get("connectionsCount")
+    if connections is None:
+        connections = first.get("connections") or first.get("connectionCount")
 
     headline = first.get("jobTitle") or first.get("headline")
     summary = first.get("description") or first.get("about") or first.get("summary")
@@ -4368,6 +4931,25 @@ def _map_apify_linkedin_profile_record(first: Dict[str, Any], source_url: str) -
         str(first.get("publicIdentifier") or first.get("username") or "").strip()
         or source_url.rsplit("/", 1)[-1][:80]
     )
+
+    employer: Optional[str] = first.get("employer")
+    if not employer:
+        current = first.get("currentPosition")
+        if isinstance(current, list) and current and isinstance(current[0], dict):
+            employer = current[0].get("companyName")
+
+    location_val = first.get("location")
+    location_text: Optional[str] = None
+    if isinstance(location_val, str):
+        location_text = location_val.strip() or None
+    elif isinstance(location_val, dict):
+        parsed = location_val.get("parsed")
+        if isinstance(parsed, dict):
+            location_text = str(parsed.get("text") or "").strip() or None
+        if not location_text:
+            location_text = str(
+                location_val.get("linkedinText") or location_val.get("text") or ""
+            ).strip() or None
 
     recent_raw = first.get("recentPosts") if isinstance(first.get("recentPosts"), list) else []
     posts_norm: List[Dict[str, Any]] = []
@@ -4397,8 +4979,14 @@ def _map_apify_linkedin_profile_record(first: Dict[str, Any], source_url: str) -
         except (TypeError, ValueError):
             engagement_rate = None
 
-    filled = sum(1 for v in (followers, headline, summary) if v)
+    filled = sum(1 for v in (followers, connections, headline, summary) if v)
     data_quality = "alta" if filled >= 2 else ("media" if filled == 1 else "baixa")
+
+    profile_image = (
+        first.get("profileImageUrl")
+        or first.get("photo")
+        or first.get("profilePictureUrl")
+    )
 
     return {
         "platform": "linkedin",
@@ -4408,19 +4996,22 @@ def _map_apify_linkedin_profile_record(first: Dict[str, Any], source_url: str) -
         or first.get("linkedinPublicUrl")
         or source_url,
         "followers_count": followers,
+        "connections_count": connections,
         "posts_count": len(posts_norm) if posts_norm else first.get("postsCount"),
         "engagement_rate": engagement_rate,
         "headline": headline,
         "summary": summary,
-        "location": first.get("location"),
-        "employer": first.get("employer"),
+        "location": location_text or location_val,
+        "employer": employer,
         "education": first.get("education"),
-        "profile_image_url": first.get("profileImageUrl"),
+        "experience": first.get("experience"),
+        "profile_image_url": profile_image,
         "recent_posts": posts_norm,
         "collection_method": "apify_linkedin_profile",
         "data_quality": data_quality,
         "apify_raw_headline": first.get("jobTitle"),
         "apify_enrichment": enrichment,
+        "harvest_profile": first,
     }
 
 
@@ -4806,6 +5397,8 @@ def _linkedin_apify_actor_kind(actor_id: str) -> str:
         return "company_employees"
     if "harvestapi" in aid and "linkedin-profile-posts" in aid:
         return "harvest_posts"
+    if "harvestapi" in aid and "linkedin-profile-scraper" in aid:
+        return "harvest_profile_scraper"
     if "linkedin-profile-scraper" in aid or aid.endswith("/linkedin-profile-scraper"):
         return "profile_scraper"
     if aid == "lqqixn9othf8f7r5n" or "apimaestro" in aid:
@@ -4856,6 +5449,15 @@ def _build_linkedin_apify_actor_payload(profile_url: str, actor_id: str) -> Dict
             "includeReposts": True,
             "scrapeReactions": False,
             "scrapeComments": False,
+        }
+    if kind == "harvest_profile_scraper":
+        mode = os.getenv(
+            "APIFY_LINKEDIN_PROFILE_SCRAPER_MODE",
+            "Profile details no email ($4 per 1k)",
+        ).strip()
+        return {
+            "profileScraperMode": mode or "Profile details no email ($4 per 1k)",
+            "queries": [profile_url],
         }
     if kind == "profile_scraper":
         return {"profileUrls": [profile_url]}
@@ -4952,6 +5554,13 @@ def _fetch_linkedin_apify_actor(profile_url: str, actor_id: str) -> Dict[str, An
         if not post_items and kind == "harvest_posts":
             post_items = items
         bundle = _linkedin_profile_bundle_from_posts(profile_url, post_items, actor_id)
+    elif kind in ("harvest_profile_scraper", "profile_scraper"):
+        first = items[0]
+        if not isinstance(first, dict):
+            raise RuntimeError(f"Apify ({actor_id}) devolveu item inválido.")
+        bundle = _map_apify_linkedin_profile_record(first, profile_url)
+        bundle["collection_method"] = f"apify:{actor_id}"
+        bundle["overview_source"] = f"apify:{actor_id}"
     else:
         first = items[0]
         if not isinstance(first, dict):
@@ -5057,6 +5666,94 @@ def _linkedin_apify_posts_have_usable_content(posts: List[Dict[str, Any]]) -> bo
     return False
 
 
+def _merge_harvest_profile_into_bundle(
+    bundle: Dict[str, Any],
+    harvest_bundle: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Combina dados de posts com o perfil harvestapi para Visão Geral e análise IA.
+
+    Mantém ``recent_posts`` e ``apify_enrichment`` do bundle principal; acrescenta
+    ``harvest_profile`` e campos de perfil (ligações, headline, experiência).
+
+    Argumentos:
+        bundle: Dados recolhidos pela cadeia de posts (ou vazio).
+        harvest_bundle: Resultado de ``harvestapi/linkedin-profile-scraper``.
+
+    Retorno:
+        Dicionário unificado para ``public_profile_data``.
+    """
+
+    merged: Dict[str, Any] = dict(bundle) if isinstance(bundle, dict) else {}
+    if not isinstance(harvest_bundle, dict):
+        return merged
+
+    harvest_raw = harvest_bundle.get("harvest_profile")
+    if isinstance(harvest_raw, dict):
+        merged["harvest_profile"] = harvest_raw
+
+    merged["overview_source"] = (
+        harvest_bundle.get("overview_source")
+        or harvest_bundle.get("collection_method")
+        or merged.get("overview_source")
+    )
+
+    for key in (
+        "headline",
+        "summary",
+        "followers_count",
+        "connections_count",
+        "location",
+        "employer",
+        "education",
+        "experience",
+        "profile_image_url",
+        "profile_url",
+    ):
+        if merged.get(key) in (None, "", []):
+            val = harvest_bundle.get(key)
+            if val not in (None, "", []):
+                merged[key] = val
+
+    if merged.get("followers_count") is None:
+        merged["followers_count"] = harvest_bundle.get("followers_count")
+    if merged.get("connections_count") is None:
+        merged["connections_count"] = harvest_bundle.get("connections_count")
+
+    if merged.get("data_quality") in (None, "baixa") and harvest_bundle.get("data_quality"):
+        merged["data_quality"] = harvest_bundle["data_quality"]
+
+    return merged
+
+
+def _enrich_linkedin_bundle_with_harvest_profile_scraper(
+    bundle: Dict[str, Any],
+    profile_url: str,
+) -> Dict[str, Any]:
+    """Executa ``harvestapi/linkedin-profile-scraper`` e funde no bundle de análise.
+
+    Falhas do actor de perfil não interrompem a análise (posts podem ter sucesso).
+
+    Argumentos:
+        bundle: ``public_profile_data`` já recolhido (posts).
+        profile_url: URL LinkedIn normalizado.
+
+    Retorno:
+        Bundle com ``harvest_profile`` quando o scrape de perfil tiver sucesso.
+    """
+
+    actor = _linkedin_harvest_profile_scraper_actor()
+    if not actor or _is_linkedin_apify_actor_blocked(actor):
+        return bundle
+
+    try:
+        harvest_bundle = _fetch_linkedin_apify_actor(profile_url, actor)
+        return _merge_harvest_profile_into_bundle(bundle, harvest_bundle)
+    except RuntimeError as exc:
+        out = dict(bundle)
+        out["harvest_profile_error"] = str(exc)[:320]
+        return out
+
+
 def _fetch_linkedin_public_profile_with_apify(profile_url: str) -> Dict[str, Any]:
     """Recolhe dados públicos de um perfil LinkedIn via cadeia de actors Apify.
 
@@ -5065,6 +5762,9 @@ def _fetch_linkedin_public_profile_with_apify(profile_url: str) -> Dict[str, Any
     1. ``harvestapi/linkedin-profile-posts`` — posts sem cookies
     2. ``harvestapi/linkedin-company-employees`` — só URLs ``/company/``
     3. ``APIFY_LINKEDIN_POSTS_ACTOR`` (ex.: ``LQQIXN9Othf8f7R5n`` / apimaestro)
+
+    Depois, sempre que configurado, corre ``APIFY_LINKEDIN_PROFILE_SCRAPER_ACTOR``
+    (por defeito ``harvestapi/linkedin-profile-scraper``) para a Visão Geral.
 
     ``sourabhbgp/linkedin-profile-scraper`` nunca corre (bloqueado no código).
 
@@ -5075,7 +5775,7 @@ def _fetch_linkedin_public_profile_with_apify(profile_url: str) -> Dict[str, Any
         Dicionário de métricas e texto para a análise OpenAI.
 
     Raises:
-        RuntimeError: Todos os actors da cadeia falharam.
+        RuntimeError: Todos os actors da cadeia de posts falharam.
     """
 
     chain = _linkedin_apify_actor_chain_from_env()
@@ -5085,11 +5785,13 @@ def _fetch_linkedin_public_profile_with_apify(profile_url: str) -> Dict[str, Any
         )
 
     errors: List[str] = []
+    bundle: Optional[Dict[str, Any]] = None
     for actor_id in chain:
         if _should_skip_linkedin_apify_actor(actor_id, profile_url):
             continue
         try:
-            return _fetch_linkedin_apify_actor(profile_url, actor_id)
+            bundle = _fetch_linkedin_apify_actor(profile_url, actor_id)
+            break
         except RuntimeError as exc:
             msg = str(exc)
             if "full-permission-actor-not-approved" in msg or "full access" in msg.lower():
@@ -5099,15 +5801,18 @@ def _fetch_linkedin_public_profile_with_apify(profile_url: str) -> Dict[str, Any
                 )
             errors.append(f"[{actor_id}] {msg}")
 
-    raise RuntimeError(
-        f"Nenhum actor Apify conseguiu dados para {profile_url}. "
-        + " | ".join(errors[:4])
-        + (
-            " Cadeia actual: "
-            + ", ".join(chain)
-            + ". Ajusta APIFY_LINKEDIN_ACTOR_CHAIN no .env."
+    if bundle is None:
+        raise RuntimeError(
+            f"Nenhum actor Apify conseguiu dados para {profile_url}. "
+            + " | ".join(errors[:4])
+            + (
+                " Cadeia actual: "
+                + ", ".join(chain)
+                + ". Ajusta APIFY_LINKEDIN_ACTOR_CHAIN no .env."
+            )
         )
-    )
+
+    return _enrich_linkedin_bundle_with_harvest_profile_scraper(bundle, profile_url)
 
 
 def _fetch_instagram_posts_with_apify(username: str, results_limit: int = 30) -> List[Dict[str, Any]]:

@@ -1,0 +1,36 @@
+﻿${autoAuthenticated 269
+${ autoAuthenticated -1
+` : "" -1
+panel-calendar 1214
+
+--- 2500 before modal ---
+nkedIn</span></h3>
+                        <p style="color:var(--muted);font-size:0.85rem;margin:0 0 10px">Gera rascunhos do teu perfil com IA. Aprova, edita ou refaz cada publicaþÒo.</p>
+                        <div id="linkedinPostsContainer" class="li-posts-wrap"><div class="li-posts-loading">Clica em <strong>Gerar posts</strong> para criar publicaþ§es com IA.</div></div>
+                        <button type="button" class="btn-analyze" style="margin-top:12px;max-width:260px" id="btnGenerateLinkedinPosts" data-action="generate-linkedin-posts" onclick="generateLinkedinPostsFromSnapshot()" disabled>Gerar posts</button>
+                      </div>
+                    </div>
+
+                    <div id="panel-calendar" class="panel">
+                      <div class="section" data-section="posts-calendario">
+                        <h3>Calendßrio semanal <span class="pill cool">LinkedIn</span></h3>
+                        <p style="color:var(--muted);font-size:0.85rem;margin:0 0 10px">Planeamento da semana a partir de hoje ù um post por dia. Aprova texto, gera imagem e publica com o mesmo fluxo da aba Posts.</p>
+                        <div id="linkedinCalendarContainer" class="li-calendar-wrap"><div class="li-posts-loading">Clica em <strong>Gerar posts da semana</strong> para planear publicaþ§es com IA.</div></div>
+                        <button type="button" class="btn-analyze" style="margin-top:12px;max-width:300px" id="btnGenerateLinkedinCalendarPosts" data-action="generate-linkedin-calendar-posts" onclick="generateLinkedinPostsForCalendar()" disabled>Gerar posts da semana</button>
+                        <div id="linkedinCalendarModal" class="li-cal-modal" aria-hidden="true" role="dialog" aria-labelledby="linkedinCalendarModalTitle">
+                          <div class="li-cal-modal-backdrop" onclick="closeLinkedinCalendarDayModal()"></div>
+                          <div class="li-cal-modal-panel" onclick="event.stopPropagation()">
+                            <div class="li-cal-modal-head">
+                              <h4 id="linkedinCalendarModalTitle">Post do dia</h4>
+                              <button type="button" class="li-cal-modal-close" onclick="closeLinkedinCalendarDayModal()" aria-label="Fechar">&times;</button>
+                            </div>
+                            <div id="linkedinCalendarModalBody" class="li-cal-modal-body"></div>
+                          </div>
+                        </div>
+                        <div 
+
+--- 400 after modal ---
+id="linkedinMetricDetailModal" class="li-metric-modal" aria-hidden="true" role="dialog" aria-labelledby="linkedinMetricDetailModalTitle">
+                          <div class="li-metric-modal-backdrop" onclick="closeLinkedinMetricDetailModal()"></div>
+                          <div class="li-metric-modal-panel" onclick="event.stopPropagation()">
+                            <div class="li-metric-mo

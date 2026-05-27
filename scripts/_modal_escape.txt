@@ -1,0 +1,33 @@
+﻿--- closeLinkedinMetricDetailModal 63937 ---
+closeLinkedinMetricDetailModal();
+                  return;
+                }
+                if (linkedinCalendarModalDateKey) closeLinkedinCalendarDayModal();
+              });
+
+              let linkedinAnalysisIsOwnProfile = false;
+
+              const LINKEDIN_POST_TYPE_LABELS = {
+                texto: "Post texto", artigo: "Artigo", documento: "Documento/PDF",
+                poll: "Sondagem", video: "VÝdeo", imagem: "Imagem", partilha: "P
+--- keydown 63685 ---
+keydown", (e) => {
+                if (e.key !== "Escape") return;
+                const metricModal = document.getElementById("linkedinMetricDetailModal");
+                if (metricModal && metricModal.classList.contains("open")) {
+                  closeLinkedinMetricDetailModal();
+                  return;
+                }
+                if (linkedinCalendarModalDateKey) closeLinkedinCalendarDayModal();
+              });
+
+              let 
+--- linkedinMetricDetailModal 55443 ---
+linkedinMetricDetailModal" class="li-metric-modal" aria-hidden="true" role="dialog" aria-labelledby="linkedinMetricDetailModalTitle">
+              <div class="li-metric-modal-backdrop" data-action="close-metric-detail"></div>
+              <div class="li-metric-modal-panel">
+                <div class="li-metric-modal-head">
+                  <h4 id="linkedinMetricDetailModalTitle">Detalhe</h4>
+                  <button type="button" class="li-m
+item modal in static False
+metric modal in static True

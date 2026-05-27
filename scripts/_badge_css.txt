@@ -1,0 +1,54 @@
+﻿
+--- .analysis-header ---
+.analysis-header {
+                background: var(--surface); border: 1px solid var(--line);
+                border-radius: 16px; padding: 18px 20px; display: flex; gap: 16px;
+                align-items: center; justify-content: space-between; flex-wrap: wrap;
+              }
+              .analysis-header .who {
+                display: flex; align-items: center; gap: 14px;
+              }
+              .ig-avatar {
+                width: 56px; height: 56px; border-radius: 50%;
+              
+
+--- .header-badges ---
+.header-badges { display: flex; gap: 8px; flex-wrap: wrap; }
+
+              /* KPI cards */
+              .kpi-grid {
+                display: grid; gap: 12px;
+                grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+              }
+              .kpi {
+                background: linear-gradient(180deg, var(--surface), var(--surface-2));
+                border: 1px solid var(--line);
+                border-radius: 14px;
+                padding: 14px 16px;
+                pos
+
+--- .badge.ok ---
+.badge.ok { color: var(--good); border-color: rgba(52,211,153,0.35); background: rgba(52,211,153,0.08); }
+              .badge.warn { color: var(--warn); border-color: rgba(251,191,36,0.35); background: rgba(251,191,36,0.08); }
+              .badge.bad { color: var(--bad); border-color: rgba(248,113,113,0.35); background: rgba(248,113,113,0.08); }
+              .badge.info { color: var(--accent); border-color: rgba(56,189,248,0.35); background: rgba(56,189,248,0.08); }
+              .badge .dot 
+
+--- .badge { ---
+.badge {
+                justify-content: center;
+                padding: 10px 12px;
+                font-size: 0.85rem;
+              }
+              .btn-linkedin-block,
+              .btn-logout-block {
+                width: 100%;
+                text-align: center;
+              }
+              .btn-save-profile {
+                background: rgba(56,189,248,0.15);
+                border: 1px solid rgba(56,189,248,0.35);
+                color: var(--accent);
+                white-space: now
+
+--- company hero stats ---

@@ -1,0 +1,37 @@
+linkedinFetchGeneratedPosts(count) {
+                const res = await fetch("/agents/linkedin/generate-posts", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    analysis: linkedinAnalysisSnapshot,
+                    public_profile_data: linkedinAnalysisSnapshot.public_profile_data || {},
+                    profile_url: linkedinAnalysisSnapshot.profile_url || "",
+                    count: count,
+                    language: "pt-PT",
+                  }),
+                });
+                const json = await res.json();
+                if (!res.ok) throw new Error(formatLinkedinApiError(json));
+                return (json.posts || []).map((row) => ({ ...row, status: "draft" }));
+              }
+
+              async function generateLinkedinPostsFromSnapshot() {
+                if (!linkedinAnalysisSnapshot) {
+                  alert("Faz primeiro uma análise de perfil.");
+                  return;
+                }
+                if (!linkedinAnalysisIsOwnProfile) {
+                  alert("Gerar posts está disponível apenas na Auto-análise do teu perfil (login + perfil guardado).");
+                  return;
+                }
+                const el = document.getElementById("linkedinPostsContainer");
+                const btn = document.getElementById("btnGenerateLinkedinPosts");
+                if (btn) { btn.disabled = true; btn.textContent = "A gerar…"; }
+                if (el) el.innerHTML = '<div class="li-posts-loading">A gerar posts com IA…</div>';
+                try {
+                  linkedinPostsTabPosts = (await linkedinFetchGeneratedPosts(3));
+                  renderLinkedinPostsContainer();
+                  enableGeneratePostsButton();
+                } catch (e) {
+                  if (el) el.innerHTML = `<div class="err">Erro: ${escapeHtml(e && e.message ? e.message : String(e))}</div>`;
+                  enableGeneratePostsB

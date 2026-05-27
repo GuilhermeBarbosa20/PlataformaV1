@@ -1,0 +1,45 @@
+btnGenerateLinkedinCalendarPosts");
+                if (postsBtn) {
+                  postsBtn.disabled = !enabled;
+                  postsBtn.textContent = label;
+                }
+                if (calBtn) {
+                  calBtn.disabled = !enabled;
+                  calBtn.textContent = calLabel;
+                }
+                document.querySelectorAll("[data-action=generate-linkedin-posts]").forEach((btn) => {
+                  btn.disabled = !enabled;
+                  if (!btn.textContent || btn.textContent.includes("Gerar")) btn.textContent = label;
+                });
+              }
+
+              function resetLinkedinPostsAfterAnalysis() {
+                linkedinPostsTabPosts = [];
+                const el = document.getElementById("linkedinPostsContainer");
+                enableGeneratePostsButton();
+                const postsHint = linkedinAnalysisSnapshot
+                  ? '<div class="li-posts-loading">Análise concluída. Clica <strong>Gerar posts</strong> para criar publicações com IA.</div>'
+                  : '<div class="li-posts-loading">Faz uma análise de perfil primeiro.</div>';
+                if (el) el.innerHTML = postsHint;
+                loadLinkedinCalendarPostsFromDatabase();
+              }
+
+              function linkedinPostTypeLabel(t) {
+                return LINKEDIN_POST_TYPE_LABELS[t] || t || "Post";
+              }
+
+              function formatLinkedinDateKey(d) {
+                const dt = d instanceof Date ? d : new Date(d);
+                const y = dt.getFullYear();
+                const m = String(dt.getMonth() + 1).padStart(2, "0");
+                const day = String(dt.getDate()).padStart(2, "0");
+                return `${y}-${m}-${day}`;
+              }
+
+              function getLinkedinWeekDays() {
+                const days = [];
+                const now = new Date();
+                now.setHours(0, 0, 0, 0);
+                for (let i = 0; i < 7; i++) {
+                  const d = new Date(now);
+   

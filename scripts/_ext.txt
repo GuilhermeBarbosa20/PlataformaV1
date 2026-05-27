@@ -1,0 +1,272 @@
+
+
+=== function renderLinkedinPersonalProfileOverview @ 139232 ===
+function renderLinkedinPersonalProfileOverview(obj, ctx, rawProfile) {
+                const pageKind = getLinkedinPageKind(ctx);
+                const first = linkedinProfileMetricRaw(obj, "firstName");
+                const last = linkedinProfileMetricRaw(obj, "lastName");
+                const name = [first, last].filter(Boolean).join(" ") || "Perfil LinkedIn";
+                const headline = linkedinProfileMetricRaw(obj, "headline");
+                const location = linkedinProfileMetricRaw(obj, "location");
+                const url = linkedinProfileMetricRaw(obj, "linkedinUrl");
+                const connections = linkedinProfileMetricRaw(obj, "connectionsCount");
+                const followers = linkedinProfileMetricRaw(obj, "followerCount");
+                const slug = linkedinProfileMetricRaw(obj, "publicIdentifier");
+                const about = linkedinProfileMetricRaw(obj, "about");
+                const avatar = extractLinkedinMetricImageUrl("photo", obj.photo) || extractLinkedinMetricImageUrl("profilePicture", obj.profilePicture);
+                const coverUrl = extractLinkedinMetricImageUrl("coverPicture", obj.coverPicture);
+
+                const statsPills = [];
+                if (connections) statsPills.push(`<span class="li-profile-stat-pill"><strong>Ligações</strong>${escapeHtml(connections)}</span>`);
+                if (followers && followers !== connections) statsPills.push(`<span class="li-profile-stat-pill"><strong>Seguidores</strong>${escapeHtml(followers)}</span>`);
+                if (slug) statsPills.push(`<span class="li-profile-stat-pill"><strong>ID público</strong>${escapeHtml(slug)}</span>`);
+
+                const avatarHtml = avatar
+                  ? `<div class="li-profile-hero-avatar"><img src="${escapeHtml(avatar)}" alt="" loading="lazy" referrerpolicy="no-referrer" /></div>`
+                  : `<div class="li-profile-hero-avatar is-empty">${escapeHtml(linkedinProfileHeroInitials(first, last))}</div>`;
+
+                const flagsHtml = LI_PROFILE_BOOL_KEYS.filter((k) => k in obj).map((k) => {
+                  const v = linkedinProfileMetricRaw(obj, k) || "—";
+                  const yes = v.toLowerCase() === "sim";
+                  return `<span class="li-profile-flag${yes ? " is-yes" : ""}">${escapeHtml(humanizeMetricKey(k, pageKind))}: ${escapeHtml(v)}</span>`;
+                }).join("");
+
+                const gridEntries = Object.entries(obj).filter(([k]) => {
+                  const key = String(k).trim();
+                  return key && !LI_PROFILE_SKIP_GRID.has(key) && !key.startsWith("certification_") && key !== "certifications_extra" && !LI_PROFILE_BOOL_KEYS.includes(key) && !LI_PROFILE_TECH_KEYS.has(key);
+                });
+
+                const techEntries = Object.entries(obj).filter(([k]) => LI_PROFILE_TECH_KEYS.has(String(k).trim()));
+
+                const gridHtml = gridEntries.length
+                  ? `<div class="li-profile-section"><h5 class="li-profile-section-title">Experiência, formação e mais</h5><div class="li-metrics-grid li-metrics-grid--compact">${gridEntries.map(([k, v]) => {
+                      const missing = isMetricValueMissing(v);
+                      const cls = linkedinMetricCardClasses(k, v, missing);
+                      const valueHtml = renderLinkedinMetricValueHtml(k, v, missing, pageKind);
+                      return `<div class="${cls}"><div class="li-metric-value">${valueHtml}</div><div class="li-metric-label">${escapeHtml(humanizeMetr
+
+=== function renderLinkedinCompanyProfileOverview @ 132748 ===
+function renderLinkedinCompanyProfileOverview(obj, ctx, rawProfile) {
+                const pageKind = "organization";
+                const name = linkedinProfileMetricRaw(obj, "name") || linkedinProfileMetricRaw(obj, "universalName") || "Empresa";
+                const tagline = linkedinProfileMetricRaw(obj, "tagline");
+                const website = linkedinProfileMetricRaw(obj, "website");
+                const url = linkedinProfileMetricRaw(obj, "linkedinUrl") || linkedinProfileMetricRaw(obj, "url");
+                const description = linkedinProfileMetricRaw(obj, "description");
+                const employees = linkedinProfileMetricRaw(obj, "employeeCount");
+                const employeeRange = linkedinProfileMetricRaw(obj, "employeeCountRange");
+                const followers = linkedinProfileMetricRaw(obj, "followerCount");
+                const phone = linkedinProfileMetricRaw(obj, "phone");
+                const founded = linkedinProfileMetricRaw(obj, "foundedOn");
+                const logo = extractLinkedinMetricImageUrl("logo", obj.logo) || extractLinkedinMetricImageUrl("logo", rawProfile.logo);
+                const coverUrl = extractLinkedinMetricImageUrl("backgroundCover", obj.backgroundCover) || extractLinkedinMetricImageUrl("backgroundCover", rawProfile.backgroundCover);
+
+                const LI_COMPANY_SKIP = new Set([
+                  "name", "universalName", "tagline", "website", "linkedinUrl", "url", "description",
+                  "logo", "backgroundCover", "backgroundCovers", "logos", "employeeCount", "employeeCountRange",
+                  "followerCount", "phone", "foundedOn", "specialities", "industries", "locations", "certifications"
+                ]);
+
+                const statsPills = [];
+                if (employees) statsPills.push(`<span class="li-profile-stat-pill"><strong>Colaboradores</strong>${escapeHtml(employees)}</span>`);
+                if (employeeRange) statsPills.push(`<span class="li-profile-stat-pill"><strong>Dimensão</strong>${escapeHtml(employeeRange)}</span>`);
+                if (followers) statsPills.push(`<span class="li-profile-stat-pill"><strong>Seguidores</strong>${escapeHtml(followers)}</span>`);
+                if (founded) statsPills.push(`<span class="li-profile-stat-pill"><strong>Fundação</strong>${escapeHtml(founded)}</span>`);
+                if (phone) statsPills.push(`<span class="li-profile-stat-pill"><strong>Telefone</strong>${escapeHtml(phone)}</span>`);
+
+                const avatarHtml = logo
+                  ? `<div class="li-profile-hero-avatar"><img src="${escapeHtml(logo)}" alt="" loading="lazy" referrerpolicy="no-referrer" /></div>`
+                  : `<div class="li-profile-hero-avatar is-empty">${escapeHtml(String(name).slice(0, 2).toUpperCase())}</div>`;
+
+                const gridEntries = Object.entries(obj || {}).filter(([k]) => {
+                  const key = String(k).trim();
+                  return key && !LI_COMPANY_SKIP.has(key) && !key.startsWith("certification_") && !LI_PROFILE_TECH_KEYS.has(key);
+                });
+
+                const gridHtml = gridEntries.length
+                  ? `<div class="li-profile-section"><h5 class="li-profile-section-title">Mais informações</h5><div class="li-metrics-grid li-metrics-grid--compact">${gridEntries.map(([k, v]) => {
+                      const missing = isMetricValueMissing(v);
+                      const cls = linkedinMetricCardClasses(k, v, missing);
+                      const valueHtml 
+
+=== function renderLinkedinMetricValueHtml @ 125514 ===
+function renderLinkedinMetricValueHtml(key, value, missing, pageKind) {
+                if (missing) return escapeHtml(METRIC_UNAVAILABLE_PUBLIC);
+                const k = String(key || "").trim();
+                const raw = String(value == null ? "" : value).trim();
+                const imgUrl = extractLinkedinMetricImageUrl(k, raw);
+                if (imgUrl) {
+                  const alt = escapeHtml(humanizeMetricKey(k, pageKind));
+                  return `<div class="li-metric-media"><img src="${escapeHtml(imgUrl)}" alt="${alt}" loading="lazy" referrerpolicy="no-referrer" /></div>`;
+                }
+                if (LINKEDIN_METRIC_URL_KEYS.has(k) && /^https?:\/\//i.test(raw)) {
+                  return `<a class="li-metric-link" href="${escapeHtml(raw)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(raw)}">Abrir perfil</a>`;
+                }
+                return escapeHtml(raw);
+              }
+
+
+              const LI_PROFILE_HERO_KEYS = new Set([
+                "photo", "profilePicture", "firstName", "lastName", "headline", "location",
+                "linkedinUrl", "connectionsCount", "followerCount", "publicIdentifier"
+              ]);
+              const LI_PROFILE_SKIP_GRID = new Set([
+                "photo", "profilePicture", "firstName", "lastName", "headline", "location",
+                "linkedinUrl", "connectionsCount", "followerCount", "publicIdentifier", "about", "coverPicture",
+                "certifications", "certifications_extra"
+              ]);
+              const LI_PROFILE_BOOL_KEYS = [
+                "openToWork", "hiring", "premium", "verified", "creator", "influencer", "memorialized"
+              ];
+              const LI_PROFILE_TECH_KEYS = new Set([
+                "id", "objectUrn", "originalQuery", "composeOptionType", "multiLocaleHeadline",
+                "primaryLocale", "profileLocales", "registeredAt"
+              ]);
+
+              function linkedinProfileMetricRaw(obj, key) {
+                if (!obj || obj[key] === undefined || obj[key] === null) return null;
+                const v = String(obj[key]).trim();
+                if (!v || isMetricValueMissing(v)) return null;
+                return v;
+              }
+
+              function linkedinProfileHeroInitials(first, last) {
+                const a = (first || "").trim().charAt(0);
+                const b = (last || "").trim().charAt(0);
+                return (a + b).toUpperCase() || "?";
+              }
+
+              
+              function harvestRawProfile(publicProfile) {
+                if (publicProfile && typeof publicProfile.harvest_profile === "object" && publicProfile.harvest_profile) {
+                  return publicProfile.harvest_profile;
+                }
+                return {};
+              }
+
+              function parseBundledCertificationText(value) {
+                const text = String(value == null ? "" : value).trim();
+                if (!text || isMetricValueMissing(text)) return [];
+                const parts = text.split(/[;|•\n]+/).map((p) => p.trim()).filter(Boolean);
+                if (parts.length <= 1 && /^\d+\s*[—–-]\s*/.test(text)) {
+                  const body = text.replace(/^\d+\s*[—–-]\s*/, "").trim();
+                  return body.split(";").map((p) => p.trim()).filter(Boolean);
+                }
+                return parts.length > 1 ? parts : (text ? [text] : []);
+              }
+
+              function renderLinkedinCertificationItem(cert, idx) {
+          
+
+=== li-cal-modal @ 38066 ===
+li-cal-modal {
+                display: none; position: fixed; inset: 0; z-index: 1200;
+                align-items: center; justify-content: center; padding: 20px;
+              }
+              .li-cal-modal.open { display: flex; }
+              .li-cal-modal-backdrop {
+                position: absolute; inset: 0; background: rgba(4,6,12,0.72); backdrop-filter: blur(4px);
+              }
+              .li-cal-modal-panel {
+                position: relative; z-index: 1; width: min(640px, 100%); max-height: min(88vh, 900px);
+                overflow-y: auto; background: var(--bg-1); border: 1px solid var(--line-strong);
+                border-radius: 16px; padding: 18px 18px 22px; box-shadow: 0 24px 60px rgba(0,0,0,0.55);
+              }
+              .li-cal-modal-head {
+                display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
+                margin-bottom: 14px; padding-bottom: 12px; border-bottom: 1px solid var(--line);
+              }
+              .li-cal-modal-head h4 { margin: 0; font-size: 1.05rem; font-weight: 700; }
+              .li-cal-modal-close {
+                flex-shrink: 0; width: 36px; height: 36px; border-radius: 10px; border: 1px solid var(--line);
+                background: var(--surface); color: var(--text); font-size: 1.4rem; line-height: 1; cursor: pointer;
+              }
+              .li-cal-modal-close:hover { border-color: rgba(251,113,133,0.5); }
+              .li-cal-modal-body .li-post-card { margin: 0; }
+              .li-calendar-empty {
+                color: var(--muted);
+                font-size: 0.78rem;
+                padding: 16px 8px;
+                text-align: center;
+                border: 1px dashed var(--line);
+                border-radius: 8px;
+                background: rgba(255,255,255,0.02);
+              }
+              .li-post-card.li-post-card-compact .li-post-body {
+                max-height: 88px;
+                overflow: hidden;
+                font-size: 0.82rem;
+              }
+              .li-post-card.li-post-card-compact .li-post-title { font-size: 0.9rem; }
+              .li-post-card.li-post-card-compact .li-post-actions { flex-wrap: wrap; gap: 4px; }
+              .li-post-card.li-post-card-compact .btn-post-ok,
+              .li-post-card.li-post-card-compact .btn-post-edit,
+              .li-post-card.li-post-card-compact .btn-post-redo,
+              .li-post-card.li-post-card-compact .btn-post-del,
+              .li-post-card.li-post-card-compact .btn-post-publish {
+                font-size: 0.72rem;
+                padding: 4px 8px;
+              }
+
+              .li-post-card {
+                border: 1px solid var(--line);
+                border-radius: 14px;
+                background: rgba(255,255,255,0.02);
+                padding: 14px 16px;
+                transition: border-color 0.15s;
+              }
+              .li-post-card.approved { border-color: rgba(52,211,153,0.45); background: rgba(52,211,153,0.06); }
+              .li-post-card.editing { border-color: rgba(56,189,248,0.45); }
+              .li-post-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; margin-bottom: 8px; }
+              .li-post-type {
+                font-size: 0.72rem; font-weight: 700; text-transform: uppercase;
+                letter-spacing: 0.06em; color: var(--accent-2);
+                background: rgba(129,140,248,0.12); padding: 3px 8px; border-radius: 999px;
+              }
+      
+
+=== gridEntries.map @ 136041 ===
+gridEntries.map(([k, v]) => {
+                      const missing = isMetricValueMissing(v);
+                      const cls = linkedinMetricCardClasses(k, v, missing);
+                      const valueHtml = renderLinkedinMetricValueHtml(k, v, missing, pageKind);
+                      return `<div class="${cls}"><div class="li-metric-value">${valueHtml}</div><div class="li-metric-label">${escapeHtml(humanizeMetricKey(k, pageKind))}</div></div>`;
+                    }).join("")}</div></div>`
+                  : "";
+
+                const techEntries = Object.entries(obj || {}).filter(([k]) => LI_PROFILE_TECH_KEYS.has(String(k).trim()));
+                const techHtml = techEntries.length ? `<details class="li-profile-tech"><summary>Detalhes técnicos (${techEntries.length})</summary><div class="li-metrics-grid">${techEntries.map(([k, v]) => {
+                  const missing = isMetricValueMissing(v);
+                  const cls = linkedinMetricCardClasses(k, v, missing) + " is-id";
+                  const valueHtml = renderLinkedinMetricValueHtml(k, v, missing, pageKind);
+                  return `<div class="${cls}"><div class="li-metric-value">${valueHtml}</div><div class="li-metric-label">${escapeHtml(humanizeMetricKey(k, pageKind))}</div></div>`;
+                }).join("")}</div></details>` : "";
+
+                return `<div class="li-profile-overview">
+                  ${coverUrl ? `<div class="li-profile-cover" style="margin-bottom:12px;border-radius:16px;overflow:hidden;max-height:140px"><img src="${escapeHtml(coverUrl)}" alt="Capa" loading="lazy" referrerpolicy="no-referrer" style="width:100%;object-fit:cover;max-height:140px" /></div>` : ""}
+                  <div class="li-profile-hero">
+                    ${avatarHtml}
+                    <div class="li-profile-hero-body">
+                      <h4 class="li-profile-hero-name">${escapeHtml(name)}</h4>
+                      ${tagline ? `<p class="li-profile-hero-headline">${escapeHtml(tagline)}</p>` : ""}
+                      ${statsPills.length ? `<div class="li-profile-hero-stats">${statsPills.join("")}</div>` : ""}
+                      <div class="li-profile-hero-actions">
+                        ${url ? `<a class="li-profile-btn" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">Ver no LinkedIn</a>` : ""}
+                        ${website && /^https?:\/\//i.test(website) ? `<a class="li-profile-btn" href="${escapeHtml(website)}" target="_blank" rel="noopener noreferrer">Website</a>` : ""}
+                      </div>
+                    </div>
+                  </div>
+                  ${description ? `<div class="li-profile-section"><h5 class="li-profile-section-title">Descrição</h5><div class="li-profile-about">${escapeHtml(description)}</div></div>` : ""}
+                  ${renderLinkedinTagSection("Especialidades", rawProfile.specialities, obj.specialities)}
+                  ${renderLinkedinTagSection("Indústrias", rawProfile.industries, obj.industries)}
+                  ${renderLinkedinCertificationsSection(rawProfile, obj)}
+                  ${gridHtml}
+                  ${techHtml}
+                </div>`;
+              }
+
+              function renderLinkedinPersonalProfileOverview(obj, ctx, rawProfile) {
+                const pageKind = getLinkedinPageKind(ctx);
+                const first = linkedinProfileMetricRaw(obj, "firstName");
+                const last = linkedinProfileMetricRaw(obj, "lastName");
+                const name = [fir

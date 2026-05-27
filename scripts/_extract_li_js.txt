@@ -1,0 +1,271 @@
+=== 53451 ===
+function findLinkedinPostEntry(id) {
+                let p = linkedinPostsTabPosts.find((x) => x.id === id);
+                if (p) return { post: p, scope: "posts" };
+                p = linkedinCalendarPosts.find((x) => x.id === id);
+                if (p) return { post: p, scope: "calendar" };
+                return { post: null, scope: "posts" };
+              }
+
+              function refreshLinkedinPostScope(scope) {
+                if (!scope || scope === "posts") renderLinkedinPostsContainer();
+                if (!scope || scope === "calendar") {
+                  renderLinkedinCalendarContainer();
+                  if (linkedinCalendarModalDateKey) renderLinkedinCalendarModalContent();
+                  if (linkedinCalendarPosts.length) scheduleSaveLinkedinCalendarPostsToDatabase();
+                }
+              }
+
+              let linkedinCalendarModalDateKey = null;
+
+              function linkedinCalendarDayLabel(dateKey) {
+                const d = new Date(dateKey + "T12:00:00");
+                if (isNaN(d.getTime())) return dateKey;
+                const dowNames = ["Domingo", "Segunda-feira", "Terça-feira", "Quarta-feira", "Quinta-feira", "Sexta-feira", "Sábado"];
+                return dowNames[d.getDay()] + " · Dia " + d.getDate();
+              }
+
+              function renderLinkedinCalendarDayPreview(p) {
+                const st = p.status || "draft";
+                const statusText = st === "approved" ? "Aprovado" : (st === "editing" ? "A editar" : "Rascunho");
+                const rawTitle = String(p.title || p.body || "").trim();
+                const short = rawTitle.length > 72 ? rawTitle.slice(0, 72) + "…" : rawTitle;
+                const imgHint = p.generated_image_url ? " · com imagem" : "";
+                return `
+                  <div class="li-calendar-day-preview">
+                    <span class="li-calendar-preview-status">${escapeHtml(statusText)}${imgHint ? " · imagem" : ""}</span>
+                    <p class="li-calendar-preview-title">${escapeHtml(short || "Post planeado")}</p>
+                    <span class="li-calendar-preview-cta">Abrir post →</span>
+                  </div>`;
+              }
+
+              function renderLinkedinCalendarModalContent() {
+                const body = document.getElementById("linkedinCalendarModalBody");
+                const titleEl = document.getElementById("linkedinCalendarModalTitle");
+                if (!body || !linkedinCalendarModalDateKey) return;
+                const key = linkedinCalendarModalDateKey;
+                if (titleEl) titleEl.textContent = linkedinCalendarDayLabel(key);
+                const posts = linkedinCalendarPosts.filter((p) => p.scheduled_date === key);
+                if (!posts.length) {
+                  body.innerHTML = '<div class="li-calendar-empty">Sem post neste dia.</div>';
+                  return;
+                }
+                body.innerHTML = posts.map((p) => renderLinkedinPostCardHtml(p, false, "calendar")).join(
+
+=== 54088 ===
+linkedinCalendarModalDateKey) renderLinkedinCalendarModalContent();
+                  if (linkedinCalendarPosts.length) scheduleSaveLinkedinCalendarPostsToDatabase();
+                }
+              }
+
+              let linkedinCalendarModalDateKey = null;
+
+              function linkedinCalendarDayLabel(dateKey) {
+                const d = new Date(dateKey + "T12:00:00");
+                if (isNaN(d.getTime())) return dateKey;
+                const dowNames = ["Domingo", "Segunda-feira", "Terça-feira", "Quarta-feira", "Quinta-feira", "Sexta-feira", "Sábado"];
+                return dowNames[d.getDay()] + " · Dia " + d.getDate();
+              }
+
+              function renderLinkedinCalendarDayPreview(p) {
+                const st = p.status || "draft";
+                const statusText = st === "approved" ? "Aprovado" : (st === "editing" ? "A editar" : "Rascunho");
+                const rawTitle = String(p.title || p.body || "").trim();
+                const short = rawTitle.length > 72 ? rawTitle.slice(0, 72) + "…" : rawTitle;
+                const imgHint = p.generated_image_url ? " · com imagem" : "";
+                return `
+                  <div class="li-calendar-day-preview">
+                    <span class="li-calendar-preview-status">${escapeHtml(statusText)}${imgHint ? " · imagem" : ""}</span>
+                    <p class="li-calendar-preview-title">${escapeHtml(short || "Post planeado")}</p>
+                    <span class="li-calendar-preview-cta">Abrir post →</span>
+                  </div>`;
+              }
+
+              function renderLinkedinCalendarModalContent() {
+                const body = document.getElementById("linkedinCalendarModalBody");
+                const titleEl = document.getElementById("linkedinCalendarModalTitle");
+                if (!body || !linkedinCalendarModalDateKey) return;
+                const key = linkedinCalendarModalDateKey;
+                if (titleEl) titleEl.textContent = linkedinCalendarDayLabel(key);
+                const posts = linkedinCalendarPosts.filter((p) => p.scheduled_date === key);
+                if (!posts.length) {
+                  body.innerHTML = '<div class="li-calendar-empty">Sem post neste dia.</div>';
+                  return;
+                }
+                body.innerHTML = posts.map((p) => renderLinkedinPostCardHtml(p, false, "calendar")).join("");
+              }
+
+              function openLinkedinCalendarDayModal(dateKey) {
+                linkedinCalendarModalDateKey = dateKey;
+                const modal = document.getElementById("linkedinCalendarModal");
+                if (!modal) return;
+                renderLinkedinCalendarModalContent();
+                modal.classList.add("open");
+                modal.setAttribute("aria-hidden", "false");
+                document.body.style.overflow = "hidden";
+              }
+
+              function closeLinkedinCalendarDayModal() {
+                linkedinCalendarModalDateKey = null;
+                const modal = documen
+
+=== 56396 ===
+renderLinkedinPostCardHtml(p, false, "calendar")).join("");
+              }
+
+              function openLinkedinCalendarDayModal(dateKey) {
+                linkedinCalendarModalDateKey = dateKey;
+                const modal = document.getElementById("linkedinCalendarModal");
+                if (!modal) return;
+                renderLinkedinCalendarModalContent();
+                modal.classList.add("open");
+                modal.setAttribute("aria-hidden", "false");
+                document.body.style.overflow = "hidden";
+              }
+
+              function closeLinkedinCalendarDayModal() {
+                linkedinCalendarModalDateKey = null;
+                const modal = document.getElementById("linkedinCalendarModal");
+                if (modal) {
+                  modal.classList.remove("open");
+                  modal.setAttribute("aria-hidden", "true");
+                }
+                document.body.style.overflow = "";
+              }
+
+              document.addEventListener("keydown", (e) => {
+                if (e.key === "Escape" && linkedinCalendarModalDateKey) closeLinkedinCalendarDayModal();
+              });
+
+              let linkedinAnalysisIsOwnProfile = false;
+
+              const LINKEDIN_POST_TYPE_LABELS = {
+                texto: "Post texto", artigo: "Artigo", documento: "Documento/PDF",
+                poll: "Sondagem", video: "Vídeo", imagem: "Imagem", partilha: "Partilha"
+              };
+
+              function setLinkedinAnalysisSnapshot(data, isOwnProfile) {
+                linkedinAnalysisSnapshot = data ? JSON.parse(JSON.stringify(data)) : null;
+                if (typeof isOwnProfile === "boolean") {
+                  linkedinAnalysisIsOwnProfile = isOwnProfile;
+                } else if (data && typeof data.linkedin_own_profile === "boolean") {
+                  linkedinAnalysisIsOwnProfile = data.linkedin_own_profile;
+                }
+              }
+
+                            function enableGeneratePostsButton() {
+                const enabled = Boolean(linkedinAnalysisSnapshot) && linkedinAnalysisIsOwnProfile;
+                const label = linkedinPostsTabPosts.length ? "Gerar novamente" : "Gerar posts";
+                const calLabel = linkedinCalendarPosts.length ? "Gerar semana novamente" : "Gerar posts da semana";
+                const postsBtn = document.getElementById("btnGenerateLinkedinPosts");
+                const calBtn = document.getElementById("btnGenerateLinkedinCalendarPosts");
+                if (postsBtn) {
+                  postsBtn.disabled = !enabled;
+                  postsBtn.textContent = label;
+                }
+                if (calBtn) {
+                  calBtn.disabled = !enabled;
+                  calBtn.textContent = calLabel;
+                }
+                document.querySelectorAll("[data-action=generate-linkedin-posts]").forEach((btn) => {
+                  btn.disabled = !enabled;
+                  if (!btn.textContent || btn.textContent.includes("Gerar")) btn.textCon
+
+=== 56487 ===
+function openLinkedinCalendarDayModal(dateKey) {
+                linkedinCalendarModalDateKey = dateKey;
+                const modal = document.getElementById("linkedinCalendarModal");
+                if (!modal) return;
+                renderLinkedinCalendarModalContent();
+                modal.classList.add("open");
+                modal.setAttribute("aria-hidden", "false");
+                document.body.style.overflow = "hidden";
+              }
+
+              function closeLinkedinCalendarDayModal() {
+                linkedinCalendarModalDateKey = null;
+                const modal = document.getElementById("linkedinCalendarModal");
+                if (modal) {
+                  modal.classList.remove("open");
+                  modal.setAttribute("aria-hidden", "true");
+                }
+                document.body.style.overflow = "";
+              }
+
+              document.addEventListener("keydown", (e) => {
+                if (e.key === "Escape" && linkedinCalendarModalDateKey) closeLinkedinCalendarDayModal();
+              });
+
+              let linkedinAnalysisIsOwnProfile = false;
+
+              const LINKEDIN_POST_TYPE_LABELS = {
+                texto: "Post texto", artigo: "Artigo", documento: "Documento/PDF",
+                poll: "Sondagem", video: "Vídeo", imagem: "Imagem", partilha: "Partilha"
+              };
+
+              function setLinkedinAnalysisSnapshot(data, isOwnProfile) {
+                linkedinAnalysisSnapshot = data ? JSON.parse(JSON.stringify(data)) : null;
+                if (typeof isOwnProfile === "boolean") {
+                  linkedinAnalysisIsOwnProfile = isOwnProfile;
+                } else if (data && typeof data.linkedin_own_profile === "boolean") {
+                  linkedinAnalysisIsOwnProfile = data.linkedin_own_profile;
+                }
+              }
+
+                            function enableGeneratePostsButton() {
+                const enabled = Boolean(linkedinAnalysisSnapshot) && linkedinAnalysisIsOwnProfile;
+                const label = linkedinPostsTabPosts.length ? "Gerar novamente" : "Gerar posts";
+                const calLabel = linkedinCalendarPosts.length ? "Gerar semana novamente" : "Gerar posts da semana";
+                const postsBtn = document.getElementById("btnGenerateLinkedinPosts");
+                const calBtn = document.getElementById("btnGenerateLinkedinCalendarPosts");
+                if (postsBtn) {
+                  postsBtn.disabled = !enabled;
+                  postsBtn.textContent = label;
+                }
+                if (calBtn) {
+                  calBtn.disabled = !enabled;
+                  calBtn.textContent = calLabel;
+                }
+                document.querySelectorAll("[data-action=generate-linkedin-posts]").forEach((btn) => {
+                  btn.disabled = !enabled;
+                  if (!btn.textContent || btn.textContent.includes("Gerar")) btn.textContent = label;
+                });
+              }
+
+              function resetLinkedinPost
+
+=== 62800 ===
+            renderLinkedinPostsContainer();
+                renderLinkedinCalendarContainer();
+              }
+
+              function renderLinkedinPostCardHtml(p, compact, scope) {
+                const postScope = scope || "posts";
+                const st = p.status || "draft";
+                const cls = ["li-post-card", compact ? "li-post-card-compact" : "", st === "approved" ? "approved" : "", st === "editing" ? "editing" : ""].filter(Boolean).join(" ");
+                const statusLabel = st === "approved" ? '<span class="li-post-status ok">Aprovado</span>' : (st === "editing" ? '<span class="li-post-status">A editar</span>' : '<span class="li-post-status">Rascunho</span>');
+                const bodyBlock = st === "editing"
+                  ? `<textarea class="li-post-edit-area" id="edit-area-${escapeHtml(p.id)}">${escapeHtml(p.bodyEdit != null ? p.bodyEdit : p.body)}</textarea>`
+                  : `<p class="li-post-body">${escapeHtml(p.body)}</p>`;
+                const actions = st === "editing"
+                  ? `<button type="button" class="btn-post-ok" onclick="saveLinkedinPostEdit('${escapeHtml(p.id)}', '${postScope}')">Guardar</button>
+                     <button type="button" class="btn-post-edit" onclick="cancelLinkedinPostEdit('${escapeHtml(p.id)}', '${postScope}')">Cancelar</button>
+                     <button type="button" class="btn-post-del" onclick="deleteLinkedinPost('${escapeHtml(p.id)}', '${postScope}')">Apagar</button>`
+                  : `<button type="button" class="btn-post-ok" onclick="approveLinkedinPost('${escapeHtml(p.id)}', '${postScope}')" ${st === "approved" ? "disabled" : ""}>Aprovado</button>
+                     <button type="button" class="btn-post-edit" onclick="startLinkedinPostEdit('${escapeHtml(p.id)}', '${postScope}')">Editar</button>
+                     <button type="button" class="btn-post-redo" onclick="regenerateLinkedinPost('${escapeHtml(p.id)}', '${postScope}')">Refazer</button>`;
+                const imgSt = p.image_status || "draft";
+                let imageBlock = "";
+                if (p.image_generating) {
+                  imageBlock = '<div class="li-post-image-loading">A gerar imagem…</div>';
+                } else if (p.generated_image_url) {
+                  const imgStatusLabel = imgSt === "approved"
+                    ? '<span class="li-post-status ok">Imagem aprovada</span>'
+                    : '<span class="li-post-status">Imagem em rascunho</span>';
+                  const imgActions = imgSt === "approved"
+                    ? `<button type="button" class="btn-post-ok" disabled>Aprovado</button>`
+                    : `<button type="button" class="btn-post-ok" onclick="approveLinkedinPostImage('${escapeHtml(p.id)}', '${postScope}')">Aprovado</button>
+                       <button type="button" class="btn-post-redo" onclick="regenerateLinkedinPostImage('${escapeHtml(p.id)}', '${postScope}')">Refazer</button>`;
+                  imageBlock = `
+                    
+

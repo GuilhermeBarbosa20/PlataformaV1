@@ -1,0 +1,17 @@
+ class="panel active">
+                      <div class="section li-metrics-section">
+                        <h3>Indicadores de desempenho <span class="pill cool">LinkedIn</span></h3>
+                        <p class="section-desc">Perfil via <strong>harvestapi/linkedin-profile-scraper</strong> (ligações, experiência, formação) e publicações via Apify. Campos sem dado público aparecem assinalados.</p>
+                        ${(data.overview_data_source || (profile && profile.overview_source)) ? `<p class="section-desc" style="margin-top:6px"><span class="badge info"><span class="dot"></span> Visão geral: ${escapeHtml(String(data.overview_data_source || profile.overview_source || "harvestapi/linkedin-profile-scraper"))}</span></p>` : ""}
+                        <div class="li-metrics-group">
+                          ${renderLinkedinHarvestProfileOverview(data.metricas_linkedin || data.metricas_instagram, data, profile)}
+                        </div>
+                        <div class="li-metrics-group li-metrics-group--posts">
+                          <h4 class="li-metrics-group-title">Desempenho das publicações</h4>
+                          ${renderLinkedinPostMetrics(data.metricas_universais, data)}
+                        </div>
+                      </div>
+                    </div>
+
+                    ${autoAuthenticated ? `
+                    <div 

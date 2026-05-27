@@ -1,0 +1,7 @@
+function linkedinMetricDetailListHtml(parts) {
+                const items = (parts || []).map((p) => String(p || "").trim()).filter(Boolean);
+                if (!items.length) return '<p class="li-metric-detail-prose">Sem detalhes.</p>';
+                return `<ul class="li-metric-detail-list">${items
+                  .map((p) => `<li>${escapeHtml(p)}</li>`)
+                  .join("")}</ul>`;
+              }

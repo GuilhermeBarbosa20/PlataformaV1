@@ -1,0 +1,18 @@
+function openLinkedinMetricDetailModal(detailId) {
+                if (!ensureLinkedinMetricDetailModal()) return;
+                const entry = linkedinMetricDetailStore[detailId];
+                if (!entry) return;
+                const modal = document.getElementById("linkedinMetricDetailModal");
+                const titleEl = document.getElementById("linkedinMetricDetailModalTitle");
+                const bodyEl = document.getElementById("linkedinMetricDetailModalBody");
+                if (!modal || !titleEl || !bodyEl) return;
+                titleEl.textContent = humanizeMetricKey(entry.key, entry.pageKind);
+                bodyEl.innerHTML = linkedinMetricDetailBodyHtml(
+                  entry.key,
+                  entry.value,
+                  entry.pageKind
+                );
+                modal.classList.add("open");
+                modal.setAttribute("aria-hidden", "false");
+                document.body.style.overflow = "hidden";
+              }

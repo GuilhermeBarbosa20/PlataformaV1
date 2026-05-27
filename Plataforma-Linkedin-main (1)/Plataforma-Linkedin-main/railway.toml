@@ -1,0 +1,14 @@
+[build]
+builder = "dockerfile"
+dockerfilePath = "Dockerfile"
+
+[build.args]
+NEXT_PUBLIC_SUPABASE_URL = "${{NEXT_PUBLIC_SUPABASE_URL}}"
+NEXT_PUBLIC_SUPABASE_ANON_KEY = "${{NEXT_PUBLIC_SUPABASE_ANON_KEY}}"
+NEXT_PUBLIC_BASE_URL = "https://teste-linkedin-gabriel-goncalves-production.up.railway.app"
+
+[deploy]
+healthcheckPath = "/api/health"
+healthcheckTimeout = 30
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 3

@@ -1,0 +1,47 @@
+function linkedinMetricDetailBodyHtml(key, value, pageKind) {
+                if (Array.isArray(value)) {
+                  const lines = value
+                    .map((item) => linkedinHarvestListItemLine(item, pageKind))
+                    .filter(Boolean);
+                  const countHtml = value.length
+                    ? `<p class="li-metric-detail-count">${escapeHtml(String(value.length))} registos</p>`
+                    : "";
+                  return countHtml + linkedinMetricDetailListHtml(lines);
+                }
+                if (typeof value === "object" && value !== null) {
+                  const rows = Object.entries(value).filter(
+                    ([_, v]) => v !== null && v !== undefined && String(v).trim()
+                  );
+                  if (!rows.length) return '<p class="li-metric-detail-prose">Sem detalhes.</p>';
+                  return `<dl class="li-metric-detail-kv">${rows
+                    .map(
+                      ([k, v]) =>
+                        `<dt>${escapeHtml(humanizeMetricKey(k, pageKind))}</dt><dd>${escapeHtml(
+                          linkedinMetricPlainText(v)
+                        )}</dd>`
+                    )
+                    .join("")}</dl>`;
+                }
+                const text = linkedinMetricPlainText(value);
+                const countMatch = text.match(/^(\d+)\s*[—\-–]\s*(.*)$/s);
+                if (countMatch) {
+                  const parts = (countMatch[2] || "")
+                    .replace(/\s*\(\+\d+\s*mais\)\s*$/i, "")
+                    .split(";")
+                    .map((s) => s.trim())
+                    .filter(Boolean);
+                  return (
+                    `<p class="li-metric-detail-count">${escapeHtml(countMatch[1])} registos</p>` +
+                    linkedinMetricDetailListHtml(parts)
+                  );
+                }
+                if (text.includes(";")) {
+                  const parts = text
+                    .replace(/\s*\(\+\d+\s*mais\)\s*$/i, "")
+                    .split(";")
+                    .map((s) => s.trim())
+                    .filter(Boolean);
+                  return linkedinMetricDetailListHtml(parts);
+                }
+                return `<div class="li-metric-detail-prose">${escapeHtml(text)}</div>`;
+              }

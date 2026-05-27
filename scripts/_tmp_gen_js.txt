@@ -1,0 +1,53 @@
+async function generateLinkedinPostsFromSnapshot(postCount) {
+                if (!linkedinAnalysisSnapshot) {
+                  alert("Faz primeiro uma análise de perfil.");
+                  return;
+                }
+                if (!linkedinAnalysisIsOwnProfile) {
+                  alert("Gerar posts está disponível apenas na Auto-análise do teu perfil (login + perfil guardado).");
+                  return;
+                }
+                const count = typeof postCount === "number" ? Math.max(1, Math.min(7, postCount)) : 3;
+                const el = document.getElementById("linkedinPostsContainer");
+                const calEl = document.getElementById("linkedinCalendarContainer");
+                const btnIds = ["btnGenerateLinkedinPosts", "btnGenerateLinkedinCalendarPosts"];
+                btnIds.forEach((id) => {
+                  const b = document.getElementById(id);
+                  if (b) { b.disabled = true; b.textContent = "A gerar…"; }
+                });
+                const loadingHtml = '<div class="li-posts-loading">A gerar posts com IA…</div>';
+                if (el) el.innerHTML = loadingHtml;
+                if (calEl) calEl.innerHTML = loadingHtml;
+                try {
+                  const res = await fetch("/agents/linkedin/generate-posts", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      analysis: linkedinAnalysisSnapshot,
+                      public_profile_data: linkedinAnalysisSnapshot.public_profile_data || {},
+                      profile_url: linkedinAnalysisSnapshot.profile_url || "",
+                      count: count,
+                      language: "pt-PT",
+                    }),
+                  });
+                  const json = await res.json();
+                  if (!res.ok) throw new Error(json.detail || JSON.stringify(json));
+                  linkedinGeneratedPosts = assignLinkedinPostsToWeek((json.posts || []).map((row) => ({
+                    ...row,
+                    status: "draft",
+                  })));
+                  refreshLinkedinPostsUI();
+                  enableGeneratePostsButton();
+                } catch (e) {
+                  const errHtml = `<div class="err">Erro: ${escapeHtml(e.message || String(e))}</div>`;
+                  if (el) el.innerHTML = errHtml;
+                  if (calEl) calEl.innerHTML = errHtml;
+                  enableGeneratePostsButton();
+                }
+              }
+
+              async function generateLinkedinPostsForCalendar() {
+                return generateLinkedinPostsFromSnapshot(7);
+              }
+
+              

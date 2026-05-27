@@ -1,0 +1,25 @@
+document.addEventListener("click", (e) => {
+                  const closeBtn = e.target.closest("[data-action=\"close-metric-detail\"]");
+                  if (closeBtn) {
+                    e.preventDefault();
+                    closeLinkedinMetricDetailModal();
+                    return;
+                  }
+                  const card = e.target.closest(".li-metric-card.is-expandable[data-detail-id]");
+                  if (!card) return;
+                  const detailId = card.getAttribute("data-detail-id");
+                  if (!detailId) return;
+                  openLinkedinMetricDetailModal(detailId);
+                });
+                document.addEventListener("keydown", (e) => {
+                  const card = e.target.closest(".li-metric-card.is-expandable[data-detail-id]");
+                  if (!card || (e.key !== "Enter" && e.key !== " ")) return;
+                  e.preventDefault();
+                  const detailId = card.getAttribute("data-detail-id");
+                  if (detailId) openLinkedinMetricDetailModal(detailId);
+                });
+              }
+              initLinkedinMetricDetailInteractions();
+
+
+              function linkedinMetricPlainText(

@@ -1,0 +1,29 @@
+ class="panel active">
+                      <div class="section">
+                        <h3>Principais Insights <span class="pill cool">IA</span></h3>
+                        <ul class="insight-list">${listSection(data.principais_insights)}</ul>
+                      </div>
+                      <div class="section">
+                        <h3>Problemas Identificados <span class="pill">atenção</span></h3>
+                        <ul class="insight-list problems">${listSection(data.problemas_identificados)}</ul>
+                      </div>
+                      <div class="section">
+                        <h3>Oportunidades <span class="pill cool">crescimento</span></h3>
+                        <ul class="insight-list opps">${listSection(data.oportunidades)}</ul>
+                      </div>
+                      <div class="section li-metrics-section">
+                        <h3>Indicadores de desempenho <span class="pill cool">LinkedIn</span></h3>
+                        <p class="section-desc">Resumo quantitativo da página e das publicações analisadas. Campos sem dado público aparecem assinalados.</p>
+                        <div class="li-metrics-group">
+                          <h4 class="li-metrics-group-title">Métricas específicas (LinkedIn)</h4>
+                          ${renderLinkedinMetricCards(data.metricas_linkedin || data.metricas_instagram, data)}
+                        </div>
+                        <div class="li-metrics-group">
+                          <h4 class="li-metrics-group-title">Desempenho geral</h4>
+                          ${renderLinkedinMetricCards(data.metricas_universais, data)}
+                        </div>
+                      </div>
+                    </div>
+
+                    ${autoAuthenticated ? `
+                    <div 

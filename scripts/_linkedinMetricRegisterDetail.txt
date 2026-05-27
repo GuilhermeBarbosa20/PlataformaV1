@@ -1,0 +1,13 @@
+function linkedinMetricRegisterDetail(key, value, pageKind) {
+                const id =
+                  "lmd-" +
+                  Date.now().toString(36) +
+                  "-" +
+                  Math.random().toString(36).slice(2, 8);
+                linkedinMetricDetailStore[id] = {
+                  key: String(key || ""),
+                  value: value,
+                  pageKind: pageKind || "personal",
+                };
+                return id;
+              }

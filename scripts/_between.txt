@@ -1,0 +1,91 @@
+function resolveLinkedinMetricDetailValue(metricKey, displayValue, rawProfile) {
+                const raw = rawProfile && typeof rawProfile === "object" ? rawProfile : {};
+                const key = String(metricKey || "").trim();
+                if (!key || !(key in raw)) return displayValue;
+                const rv = raw[key];
+                if (rv === null || rv === undefined) return displayValue;
+                if (Array.isArray(rv)) return rv.length ? rv : displayValue;
+                if (typeof rv === "object") return rv;
+                return displayValue;
+              }
+
+              
+              
+              const linkedinMetricItemDetailStore = {};
+
+              function linkedinHarvestCoerceText(value, depth) {
+                if (depth === undefined) depth = 0;
+                if (value === null || value === undefined) return "";
+                if (typeof value === "string") return value.trim();
+                if (typeof value === "number") return String(value);
+                if (typeof value === "boolean") return value ? "Sim" : "Não";
+                if (depth > 6) return "";
+                if (Array.isArray(value)) {
+                  return value
+                    .map((v) => linkedinHarvestCoerceText(v, depth + 1))
+                    .filter(Boolean)
+                    .join("; ");
+                }
+                if (typeof value !== "object") return "";
+                if (value.year != null && value.year !== "") {
+                  const y = value.year;
+                  const m = value.month;
+                  const d = value.day;
+                  if (d && m && y) return `${d}/${m}/${y}`;
+                  if (m && y) return `${m}/${y}`;
+                  return String(y);
+                }
+                for (const k of [
+                  "text",
+                  "title",
+                  "name",
+                  "localizedName",
+                  "value",
+                  "description",
+                  "accessibilityText",
+                  "caption",
+                ]) {
+                  if (value[k] != null && value[k] !== "") {
+                    const t = linkedinHarvestCoerceText(value[k], depth + 1);
+                    if (t) return t;
+                  }
+                }
+                if (value.companyName) {
+                  const t = linkedinHarvestCoerceText(value.companyName, depth + 1);
+                  if (t) return t;
+                }
+                if (value.timePeriod) {
+                  const t = linkedinHarvestFormatTimePeriod(value.timePeriod);
+                  if (t) return t;
+                }
+                return "";
+              }
+
+              function linkedinHarvestFormatTimePeriod(tp) {
+                if (!tp || typeof tp !== "object") return "";
+                const fmt = (d) => {
+                  if (!d || typeof d !== "object") return "";
+                  const y = d.year;
+                  const mo = d.month;
+                  return y ? (mo ? `${mo}/${y}` : String(y)) : "";
+                };
+                const a = fmt(tp.startDate);
+                const b = fmt(tp.endDate);
+                if (a && b) return `${a} – ${b}`;
+                return a || b || "";
+              }
+
+              function linkedinHarvestListItemLine(item, pageKind) {
+                if (item === null || item === undefined) return "";
+                if (typeof item === "string") return item.trim();
+                if (typeof item !== "object" || Array.isArray(item)) return String(item).trim();
+
+                const company =
+                  linkedinHarvestCoerceText(item.companyName) ||
+                  linkedinHarvestCoerceText(item.company) ||
+                  linkedinHarvestCoerceText(item.schoolName) ||
+                  linkedinHarvestCoerceText(item.organizationName);
+                const role =
+                  linkedinHarvestCoerceText(item.title) ||
+                  linkedinHarvestCoerceText(item.position) ||
+             

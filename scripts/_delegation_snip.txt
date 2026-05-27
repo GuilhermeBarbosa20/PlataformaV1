@@ -1,0 +1,71 @@
+const linkedinMetricDetailStore = {};
+
+              function linkedinMetricPlainText(value) {
+                if (value === null || value === undefined) return "";
+                if (typeof value === "string") return value.trim();
+                if (Array.isArray(value)) {
+                  return value
+                    .map((item) => {
+                      if (item === null || item === undefined) return "";
+                      if (typeof item === "object") {
+                        return Object.values(item)
+                          .filter((x) => x !== null && x !== undefined && String(x).trim())
+                          .map((x) => String(x).trim())
+                          .join(" · ");
+                      }
+                      return String(item).trim();
+                    })
+                    .filter(Boolean)
+                    .join("; ");
+                }
+                if (typeof value === "object") {
+                  try {
+                    return JSON.stringify(value, null, 2);
+                  } catch (e) {
+                    return String(value);
+                  }
+                }
+                return String(value).trim();
+              }
+
+              const LINKEDIN_EXPANDABLE_METRIC_KEYS = new Set([
+                "experience", "education", "skills", "certifications", "certifications_extra",
+                "publications", "projects", "volunteering", "honors", "languages",
+                "recommendations", "courses", "patents", "organizations", "interests",
+                "causes", "testScores", "featured", "highlights", "similarProfiles",
+              ]);
+
+              function linkedinMetricNeedsDetailModal(value, metricKey) {
+                if (metricKey && LINKEDIN_EXPANDABLE_METRIC_KEYS.has(String(metricKey).trim())) {
+                  return !isMetricValueMissing(value);
+                }
+                if (isMetricValueMissing(value)) return false;
+                if (Array.isArray(value) && value.length > 1) return true;
+                if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+                  const keys = Object.keys(value);
+                  if (keys.length > 2) return true;
+                  const joined = linkedinMetricPlainText(value);
+                  return joined.length > 120;
+                }
+                const text = linkedinMetricPlainText(value);
+                if (!text) return false;
+                if (text.length > 130) return true;
+                if (/\(\+\d+\s*mais\)/i.test(text)) return true;
+                if ((text.match(/;/g) || []).length >= 2) return true;
+                if (/^\d+\s*[—\-–]\s*/.test(text) && text.length > 70) return true;
+                return false;
+              }
+
+              function linkedinMetricCardPreview(value) {
+                const text = linkedinMetricPlainText(value);
+                if (!text) return "Ver detalhes";
+                const countMatch = text.match(/^(\d+)\s*[—\-–]\s*(.*)$/s);
+                if (countMatch) {
+                  const n = countMatch[1];
+                  const rest = (countMatch[2] || "").trim();
+                  const first = rest.split(";").map((s) => s.trim()).filter(Boolean)[0] || "";
+                  const short = first.length > 72 ? first.slice(0, 72) + "…" : first;
+                  return `${n} itens${short ? " · " + short : ""}`;
+                }
+                if (/\(\+\d+\s*mais\)/i.test(text)) {
+                  const head = te

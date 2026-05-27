@@ -1,0 +1,50 @@
+function renderTabs(showPostsTab) {
+                const postsTab = showPostsTab
+                  ? '<div class="tab" data-target="posts">Posts</div>'
+                  : "";
+                const calendarTab = showPostsTab
+                  ? '<div class="tab" data-target="calendar">Calendário</div>'
+                  : "";
+                return `
+                  <div class="tabs">
+                    <div class="tab active" data-target="overview">Visão Geral</div>
+                    ${postsTab}
+                    ${calendarTab}
+                    <div class="tab" data-target="content">Tipos de conteúdo</div>
+                    <div class="tab" data-target="evolution">Plano &amp; Ações</div>
+                  </div>
+                `;
+              }
+
+function attachTabHandlers() {
+                document.querySelectorAll(".tab").forEach(tab => {
+                  tab.addEventListener("click", () => {
+                    document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
+                    document.querySelectorAll(".panel").forEach(p => p.classList.remove("active"));
+                    tab.classList.add("active");
+                    const target = tab.getAttribute("data-target");
+                    const panel = document.getElementById("panel-" + target);
+                    if (panel) panel.classList.add("active");
+                    if (target === "calendar") loadLinkedinCalendarPostsFromDatabase();
+                  });
+                });
+              }
+
+              let linkedinSupabaseClient = null;
+
+              async function getLinkedinSupabaseClient() {
+                if (!SUPABASE_PUBLIC_URL || !SUPABASE_ANON_KEY) return null;
+                if (linkedinSupabaseClient) return linkedinSupabaseClient;
+                const { createClient } = await import("https://esm.sh/@supabase/supabase-js@2");
+                linkedinSupabaseClient = createClient(SUPABASE_PUBLIC_URL, SUPABASE_ANON_KEY, {
+                  auth: { detectSessionInUrl: true, persistSession: true, autoRefreshToken: true },
+                });
+                return linkedinSupabaseClient;
+              }
+
+              async function initSupabaseAuthFromUrl() {
+                const sb = await getLinkedinSupabaseClient();
+                if (!sb) return null;
+                const search = window.location.search || "";
+                const hash = window.location.hash || "";
+                const params = new URLSearchParams(search);
