@@ -63,6 +63,7 @@ Copia `.env.example` para `.env`. Resumo das mais importantes:
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` / `SUPABASE_ANON_KEY` | Chave anon Supabase |
 | `LINKEDIN_CLIENT_ID` / `LINKEDIN_CLIENT_SECRET` | App LinkedIn Developer |
 | `LINKEDIN_REDIRECT_URI` | Callback login OIDC (Supabase) |
+| `LINKEDIN_PERFIL_PATH` | Página de retorno após OAuth publicação (ex.: `/agentes/linkedin-perfil`; o browser acrescenta `?tab=calendar`) |
 | `LINKEDIN_PUBLISH_REDIRECT_URI` | Callback publicação (`/agents/linkedin/connect-publish/callback`) |
 | `LINKEDIN_SCOPES` | Ex.: `openid profile email w_member_social` |
 | `LINKEDIN_COOKIE_SECURE` | `1` em HTTPS (Render); `0` em localhost |

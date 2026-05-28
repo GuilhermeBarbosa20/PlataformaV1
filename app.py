@@ -2851,9 +2851,12 @@ def linkedin_connect_publish(
             status_code=503,
             detail="Define LINKEDIN_CLIENT_ID e LINKEDIN_CLIENT_SECRET no .env.",
         )
-    rp = (return_path or "/agentes/linkedin-perfil").strip()
+    default_perfil = str(os.getenv("LINKEDIN_PERFIL_PATH") or "/agentes/linkedin-perfil").strip()
+    if not default_perfil.startswith("/") or "://" in default_perfil:
+        default_perfil = "/agentes/linkedin-perfil"
+    rp = (return_path or default_perfil).strip()
     if not rp.startswith("/") or "://" in rp:
-        rp = "/agentes/linkedin-perfil"
+        rp = default_perfil
     base = str(request.base_url).rstrip("/")
     try:
         url = create_publish_authorization_url(base_url=base, return_path=rp)
@@ -2883,7 +2886,10 @@ def linkedin_connect_publish_callback(
         Página HTML mínima que grava o token e redireciona para o agente.
     """
 
-    return_path = "/agentes/linkedin-perfil"
+    default_perfil = str(os.getenv("LINKEDIN_PERFIL_PATH") or "/agentes/linkedin-perfil").strip()
+    if not default_perfil.startswith("/") or "://" in default_perfil:
+        default_perfil = "/agentes/linkedin-perfil"
+    return_path = default_perfil
     if error:
         msg = error_description or error
         return HTMLResponse(
