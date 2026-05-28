@@ -89,10 +89,32 @@ Executa no **SQL Editor** do projeto (por ordem):
 
 1. Liga o repositório GitHub ao Render como **Web Service** (não Static Site).  
 2. **Build:** `pip install -r requirements.txt`  
-3. **Start:** `python -m uvicorn app:app --host 0.0.0.0 --port $PORT`  
-4. **Publish Directory:** vazio  
-5. Copia todas as variáveis do `.env` para o painel Render; substitui URLs `localhost` pelo domínio `*.onrender.com`.  
-6. `git push` → redeploy automático.
+3. **Start (obrigatório):** `python -m uvicorn app:app --host 0.0.0.0 --port $PORT`  
+4. **Não uses** `--reload` no Render (o deploy falha com *Port scan timeout* / *no open ports on 0.0.0.0*).  
+5. **Publish Directory:** vazio  
+6. Copia todas as variáveis do `.env` para o painel Render; substitui URLs `localhost` pelo domínio `*.onrender.com`.  
+7. `git push` → redeploy automático.
+
+O repositório inclui `render.yaml` com estes comandos. Se o serviço já existia antes do ficheiro, confirma no painel **Settings → Start Command** que coincide com o acima.
+
+### Emails «Deploy failed» do Render
+
+Não é redirect da app — é o Render a avisar que o **deploy não subiu**. Enquanto o serviço estiver em falha, as correções (OAuth, abas, etc.) **não estão online**.
+
+Causa típica nos logs:
+
+```text
+No open ports detected on 0.0.0.0
+Running 'python -m uvicorn app:app --reload'   ← errado em produção
+```
+
+**Correção:** Settings → Start Command →
+
+```bash
+python -m uvicorn app:app --host 0.0.0.0 --port $PORT
+```
+
+Guarda, faz **Manual Deploy** e espera estado **Live** (verde).
 
 ## Testar OAuth de publicação outra vez
 

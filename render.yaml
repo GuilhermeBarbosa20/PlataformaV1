@@ -1,0 +1,13 @@
+# Configuração Render (Web Service) — evita deploy com --reload e port scan timeout.
+# Docs: https://render.com/docs/blueprint-spec
+
+services:
+  - type: web
+    name: plataforma
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m uvicorn app:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
