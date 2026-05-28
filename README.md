@@ -1,88 +1,181 @@
-# Diretor de Marketing AI (Python Web)
+# Plataforma de Agentes de Marketing AI
 
-Colaborador virtual com interface web, onde o utilizador escreve uma instrucao e o "Diretor de Marketing" encaminha automaticamente para o agente posterior mais adequado.
+Colaborador virtual com interface web: o **Diretor de Marketing** recebe instruções em linguagem natural e encaminha para o agente especializado mais adequado. Inclui agentes de copy, design, redes sociais (Instagram/Meta) e **LinkedIn (perfil)** com análise Apify, geração de posts com IA, calendário semanal e publicação OAuth.
 
-## O que este projeto faz
+## Funcionalidades principais
 
-- Recebe um input em linguagem natural.
-- Tenta primeiro classificacao autonoma com IA (modelo compatível com OpenAI API).
-- Se a IA nao estiver disponivel, usa fallback por palavras-chave.
-- Redireciona para um agente especializado:
-  - Agente Copywriter
-  - Agente Designer
-  - Agente Redes sociais
-  - Agente Meta Ads
-  - Agente Linkedin Ads
-  - Agente Google Ads
-  - Agente Web Developer
-  - Agente Seo
-  - Agente GEO
-  - Agente Analista de Score
-- Devolve um plano de acao com justificacao.
+| Área | Descrição |
+|------|-----------|
+| **Diretor** | Classificação da intenção (OpenAI ou fallback por palavras-chave) e encaminhamento para o agente certo |
+| **Copywriter / Designer** | Geração de copy e imagens via chat |
+| **Redes sociais** | Análise Instagram (Apify + Meta OAuth), histórico temporal |
+| **LinkedIn (perfil)** | Login OIDC (Supabase), análise de perfil (harvestapi + OpenAI), abas Visão Geral / Posts / Calendário, OAuth de publicação (`w_member_social`) |
 
-## Como correr
+### Agente LinkedIn (`/agentes/linkedin-perfil`)
 
-1. Criar ambiente virtual (opcional, recomendado):
+- **Auto-análise** do perfil guardado (login + URL na base de dados)
+- **Analisar** outro perfil público por URL
+- **Posts** — gerar rascunhos com IA, aprovar, editar, imagem, publicar
+- **Calendário** — planear semana, modal por dia, mesmo fluxo de publicação
+- **OAuth publicação** — fluxo separado do login Supabase; token persistido em Supabase (`user_linkedin_publish_oauth`)
+- Após autorizar publicação, regressa à aba **Posts** ou **Calendário** (não à página inicial)
+
+## Requisitos
+
+- Python 3.11+ (recomendado)
+- Conta [OpenAI](https://platform.openai.com/) (análises e geração de texto)
+- Conta [Apify](https://apify.com/) (scraping LinkedIn/Instagram)
+- Projeto [Supabase](https://supabase.com/) (auth LinkedIn OIDC + perfil/calendário/publicação)
+- App [LinkedIn Developer](https://www.linkedin.com/developers/) (login + publicação)
+- (Opcional) App Meta para Instagram
+
+## Instalação local
 
 ```bash
 python -m venv .venv
 ```
 
-2. Ativar ambiente virtual:
+**PowerShell (Windows):**
 
-- PowerShell:
-
-```bash
+```powershell
 .venv\Scripts\Activate.ps1
-```
-
-3. Instalar dependencias:
-
-```bash
 pip install -r requirements.txt
+copy .env.example .env
+# Edita .env com as tuas chaves
+python -m uvicorn app:app --reload --host 127.0.0.1 --port 8000
 ```
 
-4. Arrancar servidor:
+Abre [http://127.0.0.1:8000](http://127.0.0.1:8000).
 
-```bash
-python -m uvicorn app:app --reload
+> Em produção (Render) usa `python -m uvicorn app:app --host 0.0.0.0 --port $PORT` **sem** `--reload`.
+
+## Variáveis de ambiente
+
+Copia `.env.example` para `.env`. Resumo das mais importantes:
+
+| Variável | Uso |
+|----------|-----|
+| `OPENAI_API_KEY` | Análises, posts LinkedIn, Diretor |
+| `OPENAI_MODEL` | Modelo OpenAI (ex.: `gpt-4o-mini`) |
+| `APIFY_API_TOKEN` | Scraping LinkedIn/Instagram |
+| `APIFY_LINKEDIN_PROFILE_SCRAPER_ACTOR` | Perfil detalhado (ex.: `harvestapi/linkedin-profile-scraper`) |
+| `NEXT_PUBLIC_SUPABASE_URL` / `SUPABASE_URL` | Projeto Supabase |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` / `SUPABASE_ANON_KEY` | Chave anon Supabase |
+| `LINKEDIN_CLIENT_ID` / `LINKEDIN_CLIENT_SECRET` | App LinkedIn Developer |
+| `LINKEDIN_REDIRECT_URI` | Callback login OIDC (Supabase) |
+| `LINKEDIN_PUBLISH_REDIRECT_URI` | Callback publicação (`/agents/linkedin/connect-publish/callback`) |
+| `LINKEDIN_SCOPES` | Ex.: `openid profile email w_member_social` |
+| `LINKEDIN_COOKIE_SECURE` | `1` em HTTPS (Render); `0` em localhost |
+| `META_*` | OAuth Instagram (agente Redes sociais) |
+
+No **LinkedIn Developer** → Auth → **Authorized redirect URLs**, inclui:
+
+- `http://127.0.0.1:8000/agents/linkedin/connect-publish/callback` (local)
+- `https://<teu-dominio>/agents/linkedin/connect-publish/callback` (produção)
+
+E os redirects configurados no Supabase para o login OIDC.
+
+## Migrations Supabase
+
+Executa no **SQL Editor** do projeto (por ordem):
+
+1. `migrations/001_user_linkedin_profiles.sql` — URL do perfil LinkedIn por utilizador  
+2. `migrations/002_linkedin_school_urls.sql` — URLs de escolas (se aplicável)  
+3. `migrations/003_user_linkedin_calendar_posts.sql` — posts do calendário  
+4. `migrations/004_user_linkedin_publish_oauth.sql` — token OAuth de publicação LinkedIn  
+
+## Deploy (Render)
+
+1. Liga o repositório GitHub ao Render como **Web Service** (não Static Site).  
+2. **Build:** `pip install -r requirements.txt`  
+3. **Start:** `python -m uvicorn app:app --host 0.0.0.0 --port $PORT`  
+4. **Publish Directory:** vazio  
+5. Copia todas as variáveis do `.env` para o painel Render; substitui URLs `localhost` pelo domínio `*.onrender.com`.  
+6. `git push` → redeploy automático.
+
+## Testar OAuth de publicação outra vez
+
+A autorização de **publicação** é independente do login «Autenticado» (Supabase).
+
+**1. Browser** (consola F12 na página do agente):
+
+```javascript
+sessionStorage.removeItem("plataforma_linkedin_publish_token");
+sessionStorage.removeItem("plataforma_linkedin_publish_person_urn");
+sessionStorage.removeItem("plataforma_linkedin_publish_expires_at");
+location.reload();
 ```
 
-5. Abrir no browser:
+**2. Supabase** (obrigatório se já gravaste na BD):
 
-- [http://127.0.0.1:8000](http://127.0.0.1:8000)
+```sql
+DELETE FROM public.user_linkedin_publish_oauth;
+-- ou só o teu user_id
+```
 
-## Modo autonomo com IA
+**3. LinkedIn** (opcional): Definições → Privacidade → remover a app da plataforma.
 
-Por defeito, a fonte principal de processamento do Diretor e a OpenAI:
+Depois: aba Posts ou Calendário → **Autorizar publicação no LinkedIn**.
 
-- `OPENAI_API_KEY=<a_tua_chave>`
-- `DIRECTOR_AI_MODEL=gpt-4o-mini` (ou outro modelo OpenAI)
+## Rotas úteis
 
-No PowerShell:
+| Rota | Descrição |
+|------|-----------|
+| `GET /` | Diretor de Marketing |
+| `POST /chat` | Encaminhar pedido do utilizador |
+| `GET /agentes/linkedin-perfil` | UI agente LinkedIn |
+| `GET /agentes/redes-sociais` | UI Instagram / redes |
+| `GET /agentes/copywriter` | UI Copywriter |
+| `GET /agentes/designer` | UI Designer |
+| `POST /agents/social-media/profile-analyze` | Análise de perfil (LinkedIn, etc.) |
+| `POST /agents/linkedin/generate-posts` | Gerar posts com IA |
+| `GET /agents/linkedin/connect-publish` | Iniciar OAuth publicação |
+| `POST /agents/linkedin/publish-auth/store` | Persistir token na Supabase |
+| `POST /agents/linkedin/publish-post` | Publicar post aprovado |
 
-```bash
+Lista completa de agentes (slugs): `copywriter`, `designer`, `redes-sociais`, `linkedin-perfil`, `meta-ads`, `linkedin-ads`, `google-ads`, `web-developer`, `seo`, `geo`, `analista-score`.
+
+## Diretor — modo IA
+
+Por defeito usa OpenAI:
+
+```powershell
 $env:OPENAI_API_KEY="sk-..."
 $env:DIRECTOR_AI_MODEL="gpt-4o-mini"
 python -m uvicorn app:app --reload
 ```
 
-Opcionalmente, podes usar um endpoint compativel com OpenAI (ex.: Ollama), mas apenas com ativacao explicita:
+Endpoint:
 
-- `DIRECTOR_ALLOW_COMPATIBLE_API=true`
-- `DIRECTOR_AI_API_URL=http://127.0.0.1:11434/v1/chat/completions`
-- `DIRECTOR_AI_MODEL=llama3.1`
-- `DIRECTOR_AI_API_KEY` (opcional)
+```http
+POST /chat
+Content-Type: application/json
 
-Se a IA nao estiver disponivel ou a resposta vier invalida, o sistema continua a funcionar em modo fallback por palavras-chave.
-
-## Endpoint principal
-
-- `POST /chat`
-  - Body JSON:
-
-```json
-{
-  "user_input": "Quero melhorar a taxa de conversao dos meus anuncios"
-}
+{"user_input": "Quero melhorar a taxa de conversão dos meus anúncios"}
 ```
+
+Se a IA falhar, o sistema usa classificação por palavras-chave.
+
+API compatível (ex. Ollama): define `DIRECTOR_ALLOW_COMPATIBLE_API=true` e `DIRECTOR_AI_API_URL`.
+
+## Estrutura do projeto
+
+```
+app.py                          # FastAPI — rotas e orquestração
+agents/
+  linkedin_perfil_page.py       # HTML/JS do agente LinkedIn (embutido)
+  linkedin_harvest_profile.py   # Métricas harvestapi
+  linkedin_oauth.py             # OAuth publicação
+  linkedin_publish.py           # API UGC LinkedIn
+  linkedin_publish_auth_db.py   # Persistência Supabase
+  social_media.py               # Análises e geração de posts
+migrations/                     # SQL Supabase
+.env.example                    # Modelo de configuração
+requirements.txt
+```
+
+## Notas de segurança
+
+- Não commits `.env` nem tokens Apify/OpenAI.  
+- Em produção usa `LINKEDIN_COOKIE_SECURE=1` e `META_COOKIE_SECURE=1`.  
+- Roda as migrations antes de testar calendário ou publicação OAuth.
