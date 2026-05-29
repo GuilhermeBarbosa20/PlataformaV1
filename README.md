@@ -89,8 +89,10 @@ Executa no **SQL Editor** do projeto (por ordem):
 
 1. Liga o repositório GitHub ao Render como **Web Service** (não Static Site).  
 2. **Build:** `pip install -r requirements.txt`  
-3. **Start (obrigatório):** `python -m uvicorn app:app --host 0.0.0.0 --port $PORT`  
+3. **Start (obrigatório):** `bash start.sh`  
+   (alternativa equivalente: `python -m uvicorn app:app --host 0.0.0.0 --port $PORT`)  
 4. **Não uses** `--reload` no Render (o deploy falha com *Port scan timeout* / *no open ports on 0.0.0.0*).  
+   Se nas logs aparecer `Running 'python -m uvicorn app:app --reload'`, o painel **ainda** tem o comando antigo — edita, **Save**, **Manual Deploy**.  
 5. **Publish Directory:** vazio  
 6. Copia todas as variáveis do `.env` para o painel Render; substitui URLs `localhost` pelo domínio `*.onrender.com`.  
 7. `git push` → redeploy automático.
@@ -111,8 +113,10 @@ Running 'python -m uvicorn app:app --reload'   ← errado em produção
 **Correção:** Settings → Start Command →
 
 ```bash
-python -m uvicorn app:app --host 0.0.0.0 --port $PORT
+bash start.sh
 ```
+
+Confirma nas logs a linha `Running 'bash start.sh'` (ou `--host 0.0.0.0 --port $PORT`). **Nunca** `127.0.0.1:8000` nem `reloader process`.
 
 Guarda, faz **Manual Deploy** e espera estado **Live** (verde).
 

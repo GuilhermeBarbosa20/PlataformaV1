@@ -1783,6 +1783,13 @@ class MarketingDirector:
 director = MarketingDirector()
 
 
+@app.head("/")
+def home_head() -> HTMLResponse:
+    """Responde ao health check HEAD do Render (evita 405 na raiz)."""
+
+    return HTMLResponse(content="", status_code=200)
+
+
 @app.get("/", response_class=HTMLResponse)
 def home() -> str:
     """Renderiza interface web simples para conversar por instrução.
