@@ -45,6 +45,14 @@ from agents.linkedin_publish import (
     get_linkedin_person_urn,
     publish_to_linkedin,
 )
+from agents.director_team import (
+    build_conversation_brief,
+    build_team_task_payload,
+    execute_team_assignment,
+    infer_team_agents_from_keywords,
+    plan_team_with_llm,
+    synthesize_team_response,
+)
 from agents.social_media import (
     canonicalize_linkedin_profile_url,
     _linkedin_slug_from_openid_sub,
@@ -80,7 +88,7 @@ SOCIAL_SNAPSHOTS_FILE = DATA_DIR / "social_media_snapshots.json"
 
 app = FastAPI(
     title="Diretor de Marketing AI",
-    description="Colaborador virtual que interpreta pedidos e encaminha para agentes de marketing.",
+    description="Diretor de Marketing orquestra a equipa de agentes numa única conversa.",
     version="1.0.0",
 )
 
@@ -790,11 +798,11 @@ class SocialMediaUnifiedAnalysisRequest(BaseModel):
 
 
 class MarketingDirector:
-    """Orquestrador principal que encaminha instruções para agentes posteriores.
+    """Gestor de equipa de marketing que orquestra vários agentes numa conversa.
 
-    Este agente atua como “Diretor de Marketing”: interpreta a intenção do
-    utilizador, seleciona o agente especializado mais adequado e devolve uma
-    resposta orientada para execução.
+    O Diretor de Marketing é o front office: o utilizador fala apenas com ele.
+    Internamente, planeia tarefas, delega aos especialistas (Copywriter, Designer,
+    LinkedIn, Meta/redes, etc.) e agrega os resultados numa resposta unificada.
     """
 
     def __init__(self) -> None:
@@ -1312,25 +1320,39 @@ class MarketingDirector:
         return selected_agent
 
     def generate_chat_reply(self, messages: List[Dict[str, str]], language: str = "pt-PT") -> Dict[str, object]:
-        """Gera resposta do Diretor e estado de encaminhamento na chatroom.
+        """Orquestra a equipa e devolve resposta agregada na chatroom do Diretor.
 
-        A função usa `gpt-4o-mini` para analisar o histórico completo e produzir
-        uma resposta educada e contextual. Além do texto, devolve se já existe
-        contexto suficiente para encaminhar e, quando aplicável, qual agente
-        especializado deve receber o pedido.
+        O Diretor analisa o histórico, decide quais especialistas activar,
+        executa tarefas internamente (copy, design, redes, LinkedIn, etc.) e
+        sintetiza tudo numa única resposta para o utilizador.
 
         Argumentos:
             messages: Lista cronológica de mensagens (`role` e `content`) da sala.
             language: Idioma da resposta do Diretor (por defeito `pt-PT`).
 
         Retorno:
-            Dicionário com:
-            - `reply`: resposta textual do Diretor;
-            - `ready_to_route`: booleano indicando se já deve encaminhar;
-            - `agent_name`: nome do agente quando `ready_to_route` é `True`.
+            Dicionário com `reply`, `orchestration_mode`, `execution_plan`,
+            `team_tasks`, `agents_involved` e campos legados `ready_to_route` /
+            `agent_name` para compatibilidade.
 
         Raises:
             RuntimeError: Se `OPENAI_API_KEY` não estiver configurada.
+        """
+
+        return self.orchestrate_chat(messages=messages, language=language)
+
+    def orchestrate_chat(self, messages: List[Dict[str, str]], language: str = "pt-PT") -> Dict[str, object]:
+        """Planeia e executa trabalho multi-agente a partir do histórico da conversa.
+
+        Argumentos:
+            messages: Histórico da chatroom do Diretor.
+            language: Idioma preferido do utilizador.
+
+        Retorno:
+            Payload completo para o frontend e API (`orchestrate_chat` / `generate_chat_reply`).
+
+        Raises:
+            RuntimeError: Quando falta `OPENAI_API_KEY`.
         """
 
         self._openai_api_key = os.getenv("OPENAI_API_KEY", "").strip()
@@ -1339,28 +1361,8 @@ class MarketingDirector:
                 "OPENAI_API_KEY nao configurada no servidor. Define a variavel de ambiente para usar a chatroom do Diretor."
             )
 
+        model = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
         client = OpenAI(api_key=self._openai_api_key)
-        allowed_agents = ", ".join(self._agent_catalog)
-        system_prompt = (
-            "És o Diretor de Marketing AI numa chatroom de triagem. "
-            f"Responde sempre em {language}, com educação e brevidade. "
-            "O teu papel é APENAS perceber o pedido, fazer perguntas curtas quando faltar contexto, "
-            "e encaminhar para UM agente especializado. "
-            "PROIBIÇÃO ABSOLUTA: não escrevas copy, posts, anúncios, roteiros, emails, headlines, CTAs, "
-            "legendas, hashtags nem texto pronto para publicar. Isso é trabalho dos agentes posteriores. "
-            "Se o utilizador pedir texto para publicação/post/legenda/copy (mesmo sem dar tema), "
-            "NÃO peças tema/público/tom aqui — isso é feito na chatroom do Agente Copywriter. "
-            "Nesse caso define logo `ready_to_route` como true e `agent_name` como `Agente Copywriter`, "
-            "e em `reply` diz só que o utilizador deve clicar em «Encaminhar para o agente». "
-            "Quando já tiveres contexto suficiente para encaminhar, escolhe exatamente um agente da lista. "
-            f"Agentes permitidos: {allowed_agents}. "
-            f"{self._linkedin_routing_guidance()} "
-            "Se o utilizador quiser analisar perfil(s) LinkedIn, define logo "
-            "`ready_to_route` como true e `agent_name` como `Agente LinkedIn (perfil)`. "
-            "O campo `reply` deve ter no máximo cerca de 3 frases curtas. "
-            "Responde APENAS com JSON válido no formato: "
-            '{"reply":"<resposta ao utilizador>","ready_to_route":true|false,"agent_name":"<agente permitido ou vazio>"}'
-        )
 
         sanitized_messages: List[Dict[str, str]] = []
         for message in messages:
@@ -1370,47 +1372,89 @@ class MarketingDirector:
                 continue
             sanitized_messages.append({"role": role, "content": content})
 
-        fast_route = self._infer_route_from_last_user_message(sanitized_messages)
-        if fast_route is not None:
-            return fast_route
+        last_user = next((m for m in reversed(sanitized_messages) if m.get("role") == "user"), None)
+        last_user_text = str(last_user.get("content", "")) if last_user else ""
+        normalized_last = self._normalize_text(last_user_text) if last_user_text else ""
 
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            temperature=0.4,
-            response_format={"type": "json_object"},
-            messages=[{"role": "system", "content": system_prompt}, *sanitized_messages],
+        keyword_agents = infer_team_agents_from_keywords(
+            normalized_last,
+            self.routing_map,
+            self._normalize_text,
+            self._resolve_linkedin_routing,
         )
-        raw = (response.choices[0].message.content or "").strip()
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError:
-            return self._coerce_director_chat_decision(
-                reply=raw or "Percebi. Podes detalhar mais para eu decidir o melhor encaminhamento?",
-                ready_to_route=False,
-                agent_name=None,
-                sanitized_messages=sanitized_messages,
-            )
+        if keyword_agents:
+            keyword_agents = [
+                self._correct_agent_for_linkedin_intent(last_user_text, name) for name in keyword_agents
+            ]
 
-        reply = str(data.get("reply", "")).strip() or "Percebi. Podes detalhar mais para eu decidir o melhor encaminhamento?"
-        ready_to_route = bool(data.get("ready_to_route", False))
-        raw_agent_name = str(data.get("agent_name", "")).strip()
-        agent_name = raw_agent_name if raw_agent_name in self._agent_catalog else None
-        if ready_to_route and agent_name:
-            last_user_msg = next(
-                (m for m in reversed(sanitized_messages) if m.get("role") == "user"),
-                None,
-            )
-            last_user_text = str(last_user_msg.get("content", "")) if last_user_msg else ""
+        plan = plan_team_with_llm(
+            client=client,
+            model=model,
+            agent_catalog=self._agent_catalog,
+            linkedin_guidance=self._linkedin_routing_guidance(),
+            messages=sanitized_messages,
+            language=language,
+            keyword_agents=keyword_agents,
+        )
+
+        reply_seed = str(plan.get("reply", "")).strip()
+        execution_plan = str(plan.get("execution_plan", "")).strip()
+        needs_clarification = bool(plan.get("needs_clarification", False))
+        assignments = list(plan.get("team_assignments") or [])
+
+        if needs_clarification or not assignments:
+            return {
+                "reply": reply_seed or "Percebi. Indica objetivo, canais e público para eu mobilizar a equipa.",
+                "orchestration_mode": "planning",
+                "execution_plan": execution_plan,
+                "team_tasks": [],
+                "agents_involved": [],
+                "ready_to_route": False,
+                "agent_name": None,
+            }
+
+        conversation = build_conversation_brief(sanitized_messages)
+        raw_results: List[Dict[str, Any]] = []
+        for assignment in assignments:
+            agent_name = str(assignment.get("agent_name", "")).strip()
+            task_brief = str(assignment.get("task_brief", "")).strip()
+            if not agent_name or not task_brief:
+                continue
             agent_name = self._correct_agent_for_linkedin_intent(last_user_text, agent_name)
-        if ready_to_route and not agent_name:
-            ready_to_route = False
+            raw_results.append(
+                execute_team_assignment(
+                    agent_name=agent_name,
+                    task_brief=task_brief,
+                    conversation=conversation,
+                    language=language,
+                    action_plans=self._action_plans,
+                    openai_api_key=self._openai_api_key,
+                    openai_model=model,
+                )
+            )
 
-        return self._coerce_director_chat_decision(
-            reply=reply,
-            ready_to_route=ready_to_route,
-            agent_name=agent_name,
-            sanitized_messages=sanitized_messages,
+        team_tasks = [build_team_task_payload(r, _agent_page_url) for r in raw_results]
+        agents_involved = [t["agent_name"] for t in team_tasks if t.get("agent_name")]
+
+        final_reply = synthesize_team_response(
+            client=client,
+            model=model,
+            language=language,
+            user_reply_seed=reply_seed,
+            execution_plan=execution_plan,
+            task_results=raw_results,
         )
+
+        primary_agent = agents_involved[0] if len(agents_involved) == 1 else None
+        return {
+            "reply": final_reply,
+            "orchestration_mode": "completed",
+            "execution_plan": execution_plan,
+            "team_tasks": team_tasks,
+            "agents_involved": agents_involved,
+            "ready_to_route": bool(primary_agent),
+            "agent_name": primary_agent,
+        }
 
     def _reply_looks_like_executable_marketing_copy(self, reply: str) -> bool:
         """Deteta se o Diretor devolveu texto executável em vez de triagem.
@@ -1937,18 +1981,52 @@ def home() -> str:
           .result p { margin: 0 0 10px; color: #cbd5e1; }
           .result ol { margin: 0; padding-left: 1.2rem; }
           .result a { color: #93c5fd; text-decoration: none; font-weight: 600; }
-          .forward-btn {
-            margin-top: 12px;
-            width: 100%;
-            max-width: 320px;
-            display: block;
-            padding: 12px 16px;
+          .team-panel { margin-top: 12px; display: flex; flex-direction: column; gap: 10px; }
+          .team-card {
+            border: 1px solid var(--border);
             border-radius: 10px;
+            padding: 12px;
+            background: #111b2e;
+          }
+          .team-card h4 { margin: 0 0 6px; font-size: 0.92rem; color: #93c5fd; }
+          .team-card .status {
+            display: inline-block;
+            font-size: 0.72rem;
+            padding: 2px 8px;
+            border-radius: 999px;
+            margin-bottom: 8px;
+            background: rgba(16, 185, 129, 0.2);
+            color: #6ee7b7;
+          }
+          .team-card .status.error { background: rgba(239, 68, 68, 0.2); color: #fca5a5; }
+          .team-card .status.skipped { background: rgba(148, 163, 184, 0.2); color: #cbd5e1; }
+          .team-card pre {
+            margin: 0 0 8px;
+            white-space: pre-wrap;
+            font-family: inherit;
+            font-size: 0.85rem;
+            color: #cbd5e1;
+            line-height: 1.4;
+          }
+          .team-card a {
+            color: #93c5fd;
+            font-size: 0.82rem;
+            font-weight: 600;
+            text-decoration: none;
+          }
+          .plan-line { color: #a5b4fc; font-size: 0.88rem; margin: 0 0 10px; }
+          .forward-btn {
+            margin-top: 8px;
+            display: inline-block;
+            padding: 8px 12px;
+            border-radius: 8px;
             border: none;
-            font-weight: 700;
+            font-weight: 600;
+            font-size: 0.82rem;
             cursor: pointer;
             color: #fff;
             background: linear-gradient(180deg, #10b981, #059669);
+            text-decoration: none;
           }
           .forward-btn:hover { filter: brightness(1.06); }
           footer { margin-top: 18px; text-align: center; color: #64748b; font-size: 0.75rem; }
@@ -1964,7 +2042,7 @@ def home() -> str:
               </div>
               <div>
                 <h1 class="title">Diretor de Marketing · Chatroom</h1>
-                <p class="subtitle">Descreve o que precisas: eu esclareço em poucas palavras e, quando fizer sentido, indico o agente certo. Não escrevo aqui textos finais para publicar — isso fica com o especialista.</p>
+                <p class="subtitle">Gestor da equipa de marketing: descreve o objetivo (ex. campanha LinkedIn + Meta) e eu coordeno internamente copy, design, redes e LinkedIn — numa só conversa.</p>
               </div>
             </div>
 
@@ -1977,7 +2055,7 @@ def home() -> str:
               <button type="button" class="send-btn" onclick="sendMessage()">Enviar</button>
               <button type="button" class="reset-btn" onclick="resetChat()">Limpar conversa</button>
             </div>
-            <p class="hint">Triagem por `gpt-4o-mini`: o Diretor não publica copy final; quando estiver claro, aparece o botão para o agente certo.</p>
+            <p class="hint">Orquestração multi-agente: mobilizo a equipa por detrás e devolvo um resumo unificado. Podes abrir cada especialista para afinar detalhes.</p>
             <div id="result" class="result"></div>
           </section>
           <footer>PlataformaV1 · Diretor de Marketing AI</footer>
@@ -2018,12 +2096,60 @@ def home() -> str:
             }
           }
 
+          function escapeHtml(text) {
+            return String(text)
+              .replace(/&/g, "&amp;")
+              .replace(/</g, "&lt;")
+              .replace(/>/g, "&gt;")
+              .replace(/"/g, "&quot;");
+          }
+
+          function renderTeamPanel(data) {
+            const mode = data.orchestration_mode || "planning";
+            const plan = data.execution_plan
+              ? `<p class="plan-line"><strong>Plano:</strong> ${escapeHtml(data.execution_plan)}</p>`
+              : "";
+            const tasks = Array.isArray(data.team_tasks) ? data.team_tasks : [];
+            if (!tasks.length && mode === "planning") {
+              result.innerHTML = `${plan}<p>A recolher contexto para mobilizar a equipa…</p>`;
+              return;
+            }
+            if (!tasks.length) {
+              result.innerHTML = `${plan}<p>Sem tarefas de equipa neste turno.</p>`;
+              return;
+            }
+            const cards = tasks.map((task) => {
+              const status = (task.status || "completed").toLowerCase();
+              const summary = escapeHtml(task.summary || "");
+              const name = escapeHtml(task.agent_name || "Agente");
+              const url = task.agent_url ? escapeHtml(task.agent_url) : "";
+              const link = url
+                ? `<a class="forward-btn" href="${url}">Abrir ${name}</a>`
+                : "";
+              return `
+                <article class="team-card">
+                  <h4>${name}</h4>
+                  <span class="status ${status === "error" ? "error" : status === "skipped" ? "skipped" : ""}">${escapeHtml(status)}</span>
+                  <pre>${summary}</pre>
+                  ${link}
+                </article>
+              `;
+            }).join("");
+            const agents = (data.agents_involved || []).map(escapeHtml).join(", ");
+            result.innerHTML = `
+              <h3>Equipa mobilizada</h3>
+              ${plan}
+              ${agents ? `<p><strong>Especialistas:</strong> ${agents}</p>` : ""}
+              <div class="team-panel">${cards}</div>
+            `;
+          }
+
           async function sendMessage() {
             const content = chatInput.value.trim();
             if (!content) return;
             addMessage("user", content);
             chatInput.value = "";
-            result.innerHTML = "<p>A processar resposta com gpt-4o-mini…</p>";
+            result.innerHTML = "<p>A planear e a coordenar a equipa…</p>";
             showTypingIndicator();
 
             const payload = {
@@ -2046,17 +2172,8 @@ def home() -> str:
                 return;
               }
 
-              addMessage("assistant", data.reply || "Percebi. Podes detalhar melhor o objetivo para eu te orientar?");
-              if (data.ready_to_route && data.agent_name && data.agent_url) {
-                const safeUrl = data.agent_url.replace(/'/g, "%27");
-                result.innerHTML = `
-                  <h3>Agente recomendado</h3>
-                  <p><strong>${data.agent_name}</strong></p>
-                  <button type="button" class="forward-btn" onclick="window.location.href='${safeUrl}'">Encaminhar para o agente</button>
-                `;
-              } else {
-                result.innerHTML = "<p>Resposta enviada. O Diretor ainda está a recolher contexto antes do encaminhamento.</p>";
-              }
+              addMessage("assistant", data.reply || "Percebi. Podes detalhar melhor o objetivo para eu mobilizar a equipa?");
+              renderTeamPanel(data);
             } catch (err) {
               hideTypingIndicator();
               const errorMessage = err instanceof Error ? err.message : String(err);
@@ -2069,10 +2186,10 @@ def home() -> str:
             messages.length = 0;
             chatLog.innerHTML = "";
             result.innerHTML = "<p>Conversa reiniciada.</p>";
-            addMessage("assistant", "Olá! Sou o Diretor de Marketing AI. O que desejas fazer hoje no teu marketing?");
+            addMessage("assistant", "Olá! Sou o Diretor de Marketing AI — o teu gestor de equipa. Diz-me o objetivo (canais, público, prazo) e eu coordeno LinkedIn, Meta, copy e design por ti.");
           }
 
-          addMessage("assistant", "Olá! Sou o Diretor de Marketing AI. O que desejas fazer hoje no teu marketing?");
+          addMessage("assistant", "Olá! Sou o Diretor de Marketing AI — o teu gestor de equipa. Diz-me o objetivo (canais, público, prazo) e eu coordeno LinkedIn, Meta, copy e design por ti.");
           chatInput.addEventListener("keydown", (event) => {
             if (event.key === "Enter" && !event.shiftKey) {
               event.preventDefault();
@@ -2087,52 +2204,62 @@ def home() -> str:
 
 @app.post("/chat")
 def chat(payload: ChatRequest) -> Dict[str, object]:
-    """Processa o input do utilizador e devolve encaminhamento do diretor.
+    """Processa pedido único e orquestra a equipa de marketing do Diretor.
 
-    Esta função é o endpoint principal para conversa. Recebe a instrução,
-    chama o Diretor de Marketing e devolve o agente especializado selecionado
-    juntamente com um plano de ação.
+    Recebe uma instrução, mobiliza os agentes relevantes internamente e
+    devolve resposta agregada com tarefas por especialista.
 
     Argumentos:
         payload: Objeto validado contendo o texto do utilizador.
 
     Retorno:
-        Dicionário serializável com `agent_name`, `action_plan`,
-        `justification` e `agent_url` para apresentação no frontend e
-        navegação para a página do agente.
+        Dicionário com `reply`, `orchestration_mode`, `execution_plan`,
+        `team_tasks`, `agents_involved` e campos legados de roteamento.
     """
 
-    result = director.route(payload.user_input)
+    try:
+        decision = director.orchestrate_chat(
+            messages=[{"role": "user", "content": payload.user_input}],
+            language="pt-PT",
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"Falha ao orquestrar equipa: {exc!s}") from exc
+
+    agents = decision.get("agents_involved") or []
+    agent_name = decision.get("agent_name") or (agents[0] if len(agents) == 1 else None)
     return {
-        "agent_name": result.agent_name,
-        "action_plan": result.action_plan,
-        "justification": result.justification,
-        "agent_url": _agent_page_url(result.agent_name),
+        "reply": decision.get("reply"),
+        "orchestration_mode": decision.get("orchestration_mode"),
+        "execution_plan": decision.get("execution_plan"),
+        "team_tasks": decision.get("team_tasks", []),
+        "agents_involved": agents,
+        "agent_name": agent_name,
+        "action_plan": [t.get("summary", "")[:200] for t in decision.get("team_tasks", []) if t.get("summary")],
+        "justification": decision.get("execution_plan") or "",
+        "agent_url": _agent_page_url(str(agent_name)) if agent_name else None,
+        "ready_to_route": decision.get("ready_to_route", False),
     }
 
 
 @app.post("/director/chat-reply")
 def director_chat_reply(payload: DirectorChatTurnRequest) -> Dict[str, object]:
-    """Gera a próxima resposta autónoma do Diretor de Marketing na chatroom.
+    """Gera resposta do Diretor orquestrando a equipa na mesma conversa.
 
-    O endpoint recebe o histórico da conversa e chama o LLM (`gpt-4o-mini`) para
-    produzir uma resposta contextual e educada do Diretor. A resposta não segue
-    um guião fixo; é processada com base no conteúdo real enviado pelo
-    utilizador e no contexto acumulado.
+    O endpoint recebe o histórico, planeia tarefas para um ou vários agentes,
+    executa-os internamente quando possível e devolve uma resposta agregada.
 
     Argumentos:
         payload: Histórico validado da chatroom e idioma pretendido.
 
     Retorno:
-        Dicionário com:
-        - `reply`: resposta textual do Diretor;
-        - `ready_to_route`: sinal de encaminhamento;
-        - `agent_name`: agente recomendado quando aplicável;
-        - `agent_url`: URL do agente para navegação direta.
+        Dicionário com `reply`, `orchestration_mode`, `execution_plan`,
+        `team_tasks`, `agents_involved` e campos legados de encaminhamento.
 
     Raises:
         HTTPException: 503 quando a chave OpenAI não está configurada;
-            502 quando a geração da resposta falha no cliente OpenAI.
+            502 quando a orquestração falha.
     """
 
     try:
@@ -2146,10 +2273,15 @@ def director_chat_reply(payload: DirectorChatTurnRequest) -> Dict[str, object]:
             detail=f"Falha ao contactar OpenAI: {exc!s}",
         ) from exc
 
-    agent_name = decision.get("agent_name")
+    agents = decision.get("agents_involved") or []
+    agent_name = decision.get("agent_name") or (agents[0] if len(agents) == 1 else None)
     agent_url = _agent_page_url(str(agent_name)) if agent_name else None
     return {
         "reply": str(decision.get("reply") or "Percebi. Explica-me um pouco mais para eu orientar-te melhor."),
+        "orchestration_mode": decision.get("orchestration_mode", "planning"),
+        "execution_plan": decision.get("execution_plan", ""),
+        "team_tasks": decision.get("team_tasks", []),
+        "agents_involved": agents,
         "ready_to_route": bool(decision.get("ready_to_route", False)),
         "agent_name": agent_name,
         "agent_url": agent_url,

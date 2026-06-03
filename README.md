@@ -1,12 +1,12 @@
 # Plataforma de Agentes de Marketing AI
 
-Colaborador virtual com interface web: o **Diretor de Marketing** recebe instruções em linguagem natural e encaminha para o agente especializado mais adequado. Inclui agentes de copy, design, redes sociais (Instagram/Meta) e **LinkedIn (perfil)** com análise Apify, geração de posts com IA, calendário semanal e publicação OAuth.
+Colaborador virtual com interface web: o **Diretor de Marketing** é o gestor de equipa — numa só conversa planeia e coordena internamente copy, design, redes (Instagram/Meta) e **LinkedIn (perfil)**. Inclui análise Apify, geração de posts com IA, calendário semanal e publicação OAuth nos agentes especializados.
 
 ## Funcionalidades principais
 
 | Área | Descrição |
 |------|-----------|
-| **Diretor** | Classificação da intenção (OpenAI ou fallback por palavras-chave) e encaminhamento para o agente certo |
+| **Diretor** | Orquestração multi-agente: planeia, delega à equipa e agrega respostas na mesma chatroom |
 | **Copywriter / Designer** | Geração de copy e imagens via chat |
 | **Redes sociais** | Análise Instagram (Apify + Meta OAuth), histórico temporal |
 | **LinkedIn (perfil)** | Login OIDC (Supabase), análise de perfil (harvestapi + OpenAI), abas Visão Geral / Posts / Calendário, OAuth de publicação (`w_member_social`) |
@@ -162,34 +162,46 @@ Depois: aba Posts ou Calendário → **Autorizar publicação no LinkedIn**.
 
 Lista completa de agentes (slugs): `copywriter`, `designer`, `redes-sociais`, `linkedin-perfil`, `meta-ads`, `linkedin-ads`, `google-ads`, `web-developer`, `seo`, `geo`, `analista-score`.
 
-## Diretor — modo IA
+## Diretor — orquestração de equipa
+
+O Diretor é o **front office**: o utilizador mantém uma conversa em `/` e o backend mobiliza um ou vários agentes (copy, design, LinkedIn, Meta/redes, etc.), executa tarefas internamente e devolve uma resposta agregada.
 
 Por defeito usa OpenAI:
 
 ```powershell
 $env:OPENAI_API_KEY="sk-..."
-$env:DIRECTOR_AI_MODEL="gpt-4o-mini"
+$env:OPENAI_MODEL="gpt-4o-mini"
 python -m uvicorn app:app --reload
 ```
 
-Endpoint:
+Endpoints principais:
+
+```http
+POST /director/chat-reply
+Content-Type: application/json
+
+{"messages":[{"role":"user","content":"Campanha LinkedIn e Meta para leads B2B, tom profissional"}],"language":"pt-PT"}
+```
 
 ```http
 POST /chat
 Content-Type: application/json
 
-{"user_input": "Quero melhorar a taxa de conversão dos meus anúncios"}
+{"user_input": "Quero campanha LinkedIn + Meta com objetivo de leads"}
 ```
 
-Se a IA falhar, o sistema usa classificação por palavras-chave.
+Resposta inclui `reply`, `orchestration_mode`, `execution_plan`, `team_tasks[]` e `agents_involved[]`.
+
+Se a IA falhar no plano, o sistema usa sugestão por palavras-chave para a equipa.
 
 API compatível (ex. Ollama): define `DIRECTOR_ALLOW_COMPATIBLE_API=true` e `DIRECTOR_AI_API_URL`.
 
 ## Estrutura do projeto
 
 ```
-app.py                          # FastAPI — rotas e orquestração
+app.py                          # FastAPI — rotas e MarketingDirector
 agents/
+  director_team.py              # Orquestração multi-agente do Diretor
   linkedin_perfil_page.py       # HTML/JS do agente LinkedIn (embutido)
   linkedin_harvest_profile.py   # Métricas harvestapi
   linkedin_oauth.py             # OAuth publicação
