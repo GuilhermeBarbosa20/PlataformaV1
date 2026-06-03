@@ -2010,14 +2010,17 @@ def home() -> str:
           .wf-btn-approve { background: linear-gradient(180deg, #10b981, #059669); }
           .wf-btn-image { background: linear-gradient(180deg, #8b5cf6, #6d28d9); }
           .wf-btn-secondary { background: linear-gradient(180deg, #64748b, #475569); }
-          .stage-badge {
-            display: inline-block;
-            font-size: 0.72rem;
-            padding: 3px 10px;
-            border-radius: 999px;
-            background: rgba(147, 197, 253, 0.15);
+          .stage-hint {
+            margin: 0 0 12px;
+            color: #94a3b8;
+            font-size: 0.86rem;
+            line-height: 1.4;
+          }
+          .post-meta {
+            margin: 0 0 8px;
             color: #93c5fd;
-            margin-bottom: 8px;
+            font-size: 0.82rem;
+            line-height: 1.35;
           }
           footer { margin-top: 18px; text-align: center; color: #64748b; font-size: 0.75rem; }
           @media (max-width: 700px) { .controls { grid-template-columns: 1fr; } .msg { max-width: 94%; } }
@@ -2156,7 +2159,6 @@ def home() -> str:
             const deliverables = data.deliverables || {};
             const post = deliverables.post || (workflowState && workflowState.post) || null;
             const image = deliverables.image || (workflowState && workflowState.image) || null;
-            const pending = data.pending_actions || [];
             const stageLabel = {
               planning: "Planeamento",
               copy_review: "Revisão de copy",
@@ -2165,14 +2167,29 @@ def home() -> str:
               completed: "Concluído",
               idle: "Início"
             }[mode] || mode;
+            const stageHint = {
+              planning: "Indica objetivo, canais e público para eu preparar a campanha.",
+              copy_review: "Passo 1 de 2: revê o texto do post, edita se precisares e clica em «Aprovar copy». A imagem só vem a seguir.",
+              image_confirm: "Passo 2 de 2: copy aprovada. Queres que eu gere o criativo visual para o post?",
+              image_review: "Revê a imagem abaixo. Aprova ou pede para regenerar com novas instruções.",
+              completed: "Pacote concluído. Podes publicar no LinkedIn pelo agente dedicado.",
+              idle: "Descreve o que pretendes fazer."
+            }[mode] || "";
 
             let workflowHtml = "";
             if (post && post.body) {
               const readonly = mode !== "copy_review";
+              const metaParts = [];
+              if (post.title) metaParts.push(`Título: ${post.title}`);
+              if (post.hook) metaParts.push(`Gancho: ${post.hook}`);
+              if (post.cta) metaParts.push(`CTA: ${post.cta}`);
+              const metaHtml = metaParts.length
+                ? `<p class="post-meta">${metaParts.map(escapeHtml).join(" · ")}</p>`
+                : "";
               workflowHtml += `
                 <div class="workflow-panel">
-                  <span class="stage-badge">${escapeHtml(stageLabel)}</span>
                   <h4>Post (${escapeHtml(post.channel || "linkedin")})</h4>
+                  ${metaHtml}
                   <textarea id="workflowPostBody" class="workflow-post" ${readonly ? "readonly" : ""}>${escapeHtml(post.body || "")}</textarea>
               `;
               if (mode === "copy_review") {
@@ -2210,13 +2227,6 @@ def home() -> str:
               workflowHtml += `</div>`;
             }
 
-            const tasks = Array.isArray(data.team_tasks) ? data.team_tasks : [];
-            const taskCards = tasks.map((task) => {
-              const summary = escapeHtml((task.summary || "").slice(0, 500));
-              const name = escapeHtml(task.agent_name || "Agente");
-              return `<article class="team-card"><h4>${name}</h4><pre>${summary}</pre></article>`;
-            }).join("");
-
             let linkedinLink = "";
             if (data.agent_url && mode === "completed") {
               linkedinLink = `<a class="forward-btn" href="${escapeHtml(data.agent_url)}">Publicar no LinkedIn (OAuth)</a>`;
@@ -2226,10 +2236,9 @@ def home() -> str:
               <h3>Painel do Diretor</h3>
               ${plan}
               <p><strong>Etapa:</strong> ${escapeHtml(stageLabel)}</p>
+              ${stageHint ? `<p class="stage-hint">${escapeHtml(stageHint)}</p>` : ""}
               ${workflowHtml}
-              ${taskCards ? `<div class="team-panel">${taskCards}</div>` : ""}
               ${linkedinLink}
-              ${pending.length ? `<p class="hint">Acções: ${pending.map(escapeHtml).join(", ")}</p>` : ""}
             `;
           }
 
