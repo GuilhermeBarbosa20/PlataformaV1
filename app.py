@@ -45,14 +45,7 @@ from agents.linkedin_publish import (
     get_linkedin_person_urn,
     publish_to_linkedin,
 )
-from agents.director_team import (
-    build_conversation_brief,
-    build_team_task_payload,
-    execute_team_assignment,
-    infer_team_agents_from_keywords,
-    plan_team_with_llm,
-    synthesize_team_response,
-)
+from agents.director_workflow import process_director_turn
 from agents.social_media import (
     canonicalize_linkedin_profile_url,
     _linkedin_slug_from_openid_sub,
@@ -226,13 +219,15 @@ class DirectorChatMessage(BaseModel):
 class DirectorChatTurnRequest(BaseModel):
     """Pedido para gerar a próxima resposta do Diretor na chatroom.
 
-    O frontend envia o histórico da conversa e o backend chama o modelo
-    `gpt-4o-mini` para produzir uma resposta autónoma do Diretor, mantendo o
-    tom de consultoria estratégica e educação com o utilizador.
+    Inclui estado do fluxo operacional (copy → aprovar → imagem → aprovar) para
+    que tudo corra na interface do Diretor sem mudar de página.
 
     Argumentos:
         messages: Histórico cronológico da conversa na chatroom do Diretor.
         language: Idioma preferido da resposta (por defeito `pt-PT`).
+        workflow_state: Estado persistido entre turnos (stage, post, imagem).
+        user_action: Acção de botão (`approve_copy`, `generate_image`, etc.).
+        action_payload: Dados extra (corpo editado, instruções de imagem).
 
     Retorno:
         Instância validada para o endpoint `POST /director/chat-reply`.
@@ -242,6 +237,15 @@ class DirectorChatTurnRequest(BaseModel):
         ..., min_length=1, description="Histórico de mensagens da chatroom do Diretor."
     )
     language: str = Field("pt-PT", min_length=2, description="Idioma da resposta do Diretor.")
+    workflow_state: Optional[Dict[str, Any]] = Field(
+        None, description="Estado do fluxo copy/imagem na interface do Diretor."
+    )
+    user_action: Optional[str] = Field(
+        None, description="Acção explícita: approve_copy, generate_image, approve_image, etc."
+    )
+    action_payload: Optional[Dict[str, Any]] = Field(
+        None, description="Payload opcional para edit_copy ou regenerar imagem."
+    )
 
 
 class CopywriterRequest(BaseModel):
@@ -1319,37 +1323,57 @@ class MarketingDirector:
             return "Agente LinkedIn (perfil)"
         return selected_agent
 
-    def generate_chat_reply(self, messages: List[Dict[str, str]], language: str = "pt-PT") -> Dict[str, object]:
-        """Orquestra a equipa e devolve resposta agregada na chatroom do Diretor.
-
-        O Diretor analisa o histórico, decide quais especialistas activar,
-        executa tarefas internamente (copy, design, redes, LinkedIn, etc.) e
-        sintetiza tudo numa única resposta para o utilizador.
+    def generate_chat_reply(
+        self,
+        messages: List[Dict[str, str]],
+        language: str = "pt-PT",
+        workflow_state: Optional[Dict[str, Any]] = None,
+        user_action: Optional[str] = None,
+        action_payload: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, object]:
+        """Orquestra copy, aprovações e imagem na chatroom do Diretor.
 
         Argumentos:
-            messages: Lista cronológica de mensagens (`role` e `content`) da sala.
-            language: Idioma da resposta do Diretor (por defeito `pt-PT`).
+            messages: Histórico da conversa.
+            language: Idioma da resposta.
+            workflow_state: Estado do fluxo no frontend.
+            user_action: Acção de botão (approve_copy, generate_image, …).
+            action_payload: Dados de edição ou regeneração.
 
         Retorno:
-            Dicionário com `reply`, `orchestration_mode`, `execution_plan`,
-            `team_tasks`, `agents_involved` e campos legados `ready_to_route` /
-            `agent_name` para compatibilidade.
+            Payload com `reply`, `workflow_state`, `deliverables`, etc.
 
         Raises:
             RuntimeError: Se `OPENAI_API_KEY` não estiver configurada.
         """
 
-        return self.orchestrate_chat(messages=messages, language=language)
+        return self.orchestrate_chat(
+            messages=messages,
+            language=language,
+            workflow_state=workflow_state,
+            user_action=user_action,
+            action_payload=action_payload,
+        )
 
-    def orchestrate_chat(self, messages: List[Dict[str, str]], language: str = "pt-PT") -> Dict[str, object]:
-        """Planeia e executa trabalho multi-agente a partir do histórico da conversa.
+    def orchestrate_chat(
+        self,
+        messages: List[Dict[str, str]],
+        language: str = "pt-PT",
+        workflow_state: Optional[Dict[str, Any]] = None,
+        user_action: Optional[str] = None,
+        action_payload: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, object]:
+        """Coordena copy, aprovações e imagem na interface do Diretor.
 
         Argumentos:
             messages: Histórico da chatroom do Diretor.
             language: Idioma preferido do utilizador.
+            workflow_state: Estado do fluxo (frontend).
+            user_action: Acção de botão ou inferida do texto.
+            action_payload: Dados de edição ou regeneração de imagem.
 
         Retorno:
-            Payload completo para o frontend e API (`orchestrate_chat` / `generate_chat_reply`).
+            Payload com `reply`, `workflow_state`, `deliverables`, `pending_actions`.
 
         Raises:
             RuntimeError: Quando falta `OPENAI_API_KEY`.
@@ -1362,99 +1386,23 @@ class MarketingDirector:
             )
 
         model = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
-        client = OpenAI(api_key=self._openai_api_key)
-
-        sanitized_messages: List[Dict[str, str]] = []
-        for message in messages:
-            role = str(message.get("role", "")).strip()
-            content = str(message.get("content", "")).strip()
-            if role not in {"user", "assistant"} or not content:
-                continue
-            sanitized_messages.append({"role": role, "content": content})
-
-        last_user = next((m for m in reversed(sanitized_messages) if m.get("role") == "user"), None)
-        last_user_text = str(last_user.get("content", "")) if last_user else ""
-        normalized_last = self._normalize_text(last_user_text) if last_user_text else ""
-
-        keyword_agents = infer_team_agents_from_keywords(
-            normalized_last,
-            self.routing_map,
-            self._normalize_text,
-            self._resolve_linkedin_routing,
-        )
-        if keyword_agents:
-            keyword_agents = [
-                self._correct_agent_for_linkedin_intent(last_user_text, name) for name in keyword_agents
-            ]
-
-        plan = plan_team_with_llm(
-            client=client,
-            model=model,
+        return process_director_turn(
+            messages=messages,
+            language=language,
+            workflow_state=workflow_state,
+            user_action=user_action,
+            action_payload=action_payload,
+            openai_api_key=self._openai_api_key,
+            openai_model=model,
             agent_catalog=self._agent_catalog,
+            routing_map=self.routing_map,
+            action_plans=self._action_plans,
             linkedin_guidance=self._linkedin_routing_guidance(),
-            messages=sanitized_messages,
-            language=language,
-            keyword_agents=keyword_agents,
+            normalize_text=self._normalize_text,
+            resolve_linkedin=self._resolve_linkedin_routing,
+            correct_linkedin_agent=self._correct_agent_for_linkedin_intent,
+            agent_page_url=_agent_page_url,
         )
-
-        reply_seed = str(plan.get("reply", "")).strip()
-        execution_plan = str(plan.get("execution_plan", "")).strip()
-        needs_clarification = bool(plan.get("needs_clarification", False))
-        assignments = list(plan.get("team_assignments") or [])
-
-        if needs_clarification or not assignments:
-            return {
-                "reply": reply_seed or "Percebi. Indica objetivo, canais e público para eu mobilizar a equipa.",
-                "orchestration_mode": "planning",
-                "execution_plan": execution_plan,
-                "team_tasks": [],
-                "agents_involved": [],
-                "ready_to_route": False,
-                "agent_name": None,
-            }
-
-        conversation = build_conversation_brief(sanitized_messages)
-        raw_results: List[Dict[str, Any]] = []
-        for assignment in assignments:
-            agent_name = str(assignment.get("agent_name", "")).strip()
-            task_brief = str(assignment.get("task_brief", "")).strip()
-            if not agent_name or not task_brief:
-                continue
-            agent_name = self._correct_agent_for_linkedin_intent(last_user_text, agent_name)
-            raw_results.append(
-                execute_team_assignment(
-                    agent_name=agent_name,
-                    task_brief=task_brief,
-                    conversation=conversation,
-                    language=language,
-                    action_plans=self._action_plans,
-                    openai_api_key=self._openai_api_key,
-                    openai_model=model,
-                )
-            )
-
-        team_tasks = [build_team_task_payload(r, _agent_page_url) for r in raw_results]
-        agents_involved = [t["agent_name"] for t in team_tasks if t.get("agent_name")]
-
-        final_reply = synthesize_team_response(
-            client=client,
-            model=model,
-            language=language,
-            user_reply_seed=reply_seed,
-            execution_plan=execution_plan,
-            task_results=raw_results,
-        )
-
-        primary_agent = agents_involved[0] if len(agents_involved) == 1 else None
-        return {
-            "reply": final_reply,
-            "orchestration_mode": "completed",
-            "execution_plan": execution_plan,
-            "team_tasks": team_tasks,
-            "agents_involved": agents_involved,
-            "ready_to_route": bool(primary_agent),
-            "agent_name": primary_agent,
-        }
 
     def _reply_looks_like_executable_marketing_copy(self, reply: str) -> bool:
         """Deteta se o Diretor devolveu texto executável em vez de triagem.
@@ -2029,6 +1977,48 @@ def home() -> str:
             text-decoration: none;
           }
           .forward-btn:hover { filter: brightness(1.06); }
+          .workflow-panel { margin-top: 12px; display: flex; flex-direction: column; gap: 12px; }
+          .workflow-post {
+            width: 100%;
+            min-height: 140px;
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            background: #0f172a;
+            color: var(--text);
+            padding: 10px;
+            font-family: inherit;
+            font-size: 0.9rem;
+            line-height: 1.45;
+            resize: vertical;
+          }
+          .workflow-image {
+            max-width: 100%;
+            border-radius: 10px;
+            border: 1px solid var(--border);
+            margin-top: 8px;
+          }
+          .workflow-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+          .wf-btn {
+            border: none;
+            border-radius: 8px;
+            padding: 9px 12px;
+            font-weight: 600;
+            font-size: 0.82rem;
+            cursor: pointer;
+            color: #fff;
+          }
+          .wf-btn-approve { background: linear-gradient(180deg, #10b981, #059669); }
+          .wf-btn-image { background: linear-gradient(180deg, #8b5cf6, #6d28d9); }
+          .wf-btn-secondary { background: linear-gradient(180deg, #64748b, #475569); }
+          .stage-badge {
+            display: inline-block;
+            font-size: 0.72rem;
+            padding: 3px 10px;
+            border-radius: 999px;
+            background: rgba(147, 197, 253, 0.15);
+            color: #93c5fd;
+            margin-bottom: 8px;
+          }
           footer { margin-top: 18px; text-align: center; color: #64748b; font-size: 0.75rem; }
           @media (max-width: 700px) { .controls { grid-template-columns: 1fr; } .msg { max-width: 94%; } }
         </style>
@@ -2042,7 +2032,7 @@ def home() -> str:
               </div>
               <div>
                 <h1 class="title">Diretor de Marketing · Chatroom</h1>
-                <p class="subtitle">Gestor da equipa de marketing: descreve o objetivo (ex. campanha LinkedIn + Meta) e eu coordeno internamente copy, design, redes e LinkedIn — numa só conversa.</p>
+                <p class="subtitle">Tudo aqui: campanha → copy → tu aprovas → imagem → tu aprovas. Publicação OAuth/calendário LinkedIn no agente dedicado.</p>
               </div>
             </div>
 
@@ -2055,7 +2045,7 @@ def home() -> str:
               <button type="button" class="send-btn" onclick="sendMessage()">Enviar</button>
               <button type="button" class="reset-btn" onclick="resetChat()">Limpar conversa</button>
             </div>
-            <p class="hint">Orquestração multi-agente: mobilizo a equipa por detrás e devolvo um resumo unificado. Podes abrir cada especialista para afinar detalhes.</p>
+            <p class="hint">Fluxo: 1) Aprovar copy 2) Gerar imagem 3) Aprovar imagem. Também podes escrever «aprovo» ou «gera imagem».</p>
             <div id="result" class="result"></div>
           </section>
           <footer>PlataformaV1 · Diretor de Marketing AI</footer>
@@ -2066,6 +2056,7 @@ def home() -> str:
           const languageInput = document.getElementById("languageInput");
           const result = document.getElementById("result");
           const messages = [];
+          let workflowState = null;
 
           function addMessage(role, content) {
             messages.push({ role, content });
@@ -2104,59 +2095,17 @@ def home() -> str:
               .replace(/"/g, "&quot;");
           }
 
-          function renderTeamPanel(data) {
-            const mode = data.orchestration_mode || "planning";
-            const plan = data.execution_plan
-              ? `<p class="plan-line"><strong>Plano:</strong> ${escapeHtml(data.execution_plan)}</p>`
-              : "";
-            const tasks = Array.isArray(data.team_tasks) ? data.team_tasks : [];
-            if (!tasks.length && mode === "planning") {
-              result.innerHTML = `${plan}<p>A recolher contexto para mobilizar a equipa…</p>`;
-              return;
+          function applyDirectorResponse(data) {
+            if (data.workflow_state) {
+              workflowState = data.workflow_state;
             }
-            if (!tasks.length) {
-              result.innerHTML = `${plan}<p>Sem tarefas de equipa neste turno.</p>`;
-              return;
-            }
-            const cards = tasks.map((task) => {
-              const status = (task.status || "completed").toLowerCase();
-              const summary = escapeHtml(task.summary || "");
-              const name = escapeHtml(task.agent_name || "Agente");
-              const url = task.agent_url ? escapeHtml(task.agent_url) : "";
-              const link = url
-                ? `<a class="forward-btn" href="${url}">Abrir ${name}</a>`
-                : "";
-              return `
-                <article class="team-card">
-                  <h4>${name}</h4>
-                  <span class="status ${status === "error" ? "error" : status === "skipped" ? "skipped" : ""}">${escapeHtml(status)}</span>
-                  <pre>${summary}</pre>
-                  ${link}
-                </article>
-              `;
-            }).join("");
-            const agents = (data.agents_involved || []).map(escapeHtml).join(", ");
-            result.innerHTML = `
-              <h3>Equipa mobilizada</h3>
-              ${plan}
-              ${agents ? `<p><strong>Especialistas:</strong> ${agents}</p>` : ""}
-              <div class="team-panel">${cards}</div>
-            `;
+            addMessage("assistant", data.reply || "Percebi.");
+            renderDirectorPanel(data);
           }
 
-          async function sendMessage() {
-            const content = chatInput.value.trim();
-            if (!content) return;
-            addMessage("user", content);
-            chatInput.value = "";
-            result.innerHTML = "<p>A planear e a coordenar a equipa…</p>";
+          async function callDirector(payload) {
+            result.innerHTML = "<p>A processar…</p>";
             showTypingIndicator();
-
-            const payload = {
-              messages,
-              language: languageInput.value.trim() || "pt-PT"
-            };
-
             try {
               const response = await fetch("/director/chat-reply", {
                 method: "POST",
@@ -2171,9 +2120,7 @@ def home() -> str:
                 result.innerHTML = `<p><strong>Erro:</strong> ${detailText}</p>`;
                 return;
               }
-
-              addMessage("assistant", data.reply || "Percebi. Podes detalhar melhor o objetivo para eu mobilizar a equipa?");
-              renderTeamPanel(data);
+              applyDirectorResponse(data);
             } catch (err) {
               hideTypingIndicator();
               const errorMessage = err instanceof Error ? err.message : String(err);
@@ -2182,14 +2129,141 @@ def home() -> str:
             }
           }
 
-          function resetChat() {
-            messages.length = 0;
-            chatLog.innerHTML = "";
-            result.innerHTML = "<p>Conversa reiniciada.</p>";
-            addMessage("assistant", "Olá! Sou o Diretor de Marketing AI — o teu gestor de equipa. Diz-me o objetivo (canais, público, prazo) e eu coordeno LinkedIn, Meta, copy e design por ti.");
+          function buildPayload(extra = {}) {
+            return {
+              messages,
+              language: languageInput.value.trim() || "pt-PT",
+              workflow_state: workflowState,
+              ...extra
+            };
           }
 
-          addMessage("assistant", "Olá! Sou o Diretor de Marketing AI — o teu gestor de equipa. Diz-me o objetivo (canais, público, prazo) e eu coordeno LinkedIn, Meta, copy e design por ti.");
+          async function directorAction(action, actionPayload = {}, userLabel = "") {
+            if (userLabel) {
+              addMessage("user", userLabel);
+            }
+            await callDirector(buildPayload({
+              user_action: action,
+              action_payload: actionPayload
+            }));
+          }
+
+          function renderDirectorPanel(data) {
+            const mode = data.orchestration_mode || "planning";
+            const plan = data.execution_plan
+              ? `<p class="plan-line"><strong>Plano:</strong> ${escapeHtml(data.execution_plan)}</p>`
+              : "";
+            const deliverables = data.deliverables || {};
+            const post = deliverables.post || (workflowState && workflowState.post) || null;
+            const image = deliverables.image || (workflowState && workflowState.image) || null;
+            const pending = data.pending_actions || [];
+            const stageLabel = {
+              planning: "Planeamento",
+              copy_review: "Revisão de copy",
+              image_confirm: "Confirmar imagem",
+              image_review: "Revisão de imagem",
+              completed: "Concluído",
+              idle: "Início"
+            }[mode] || mode;
+
+            let workflowHtml = "";
+            if (post && post.body) {
+              const readonly = mode !== "copy_review";
+              workflowHtml += `
+                <div class="workflow-panel">
+                  <span class="stage-badge">${escapeHtml(stageLabel)}</span>
+                  <h4>Post (${escapeHtml(post.channel || "linkedin")})</h4>
+                  <textarea id="workflowPostBody" class="workflow-post" ${readonly ? "readonly" : ""}>${escapeHtml(post.body || "")}</textarea>
+              `;
+              if (mode === "copy_review") {
+                workflowHtml += `
+                  <div class="workflow-actions">
+                    <button type="button" class="wf-btn wf-btn-approve" onclick="approveCopy()">Aprovar copy</button>
+                    <button type="button" class="wf-btn wf-btn-secondary" onclick="saveCopyEdit()">Guardar edição</button>
+                  </div>
+                `;
+              }
+              if (mode === "image_confirm") {
+                workflowHtml += `
+                  <div class="workflow-actions">
+                    <button type="button" class="wf-btn wf-btn-image" onclick="generateImage()">Gerar imagem</button>
+                    <button type="button" class="wf-btn wf-btn-secondary" onclick="skipImage()">Sem imagem</button>
+                  </div>
+                `;
+              }
+              workflowHtml += `</div>`;
+            }
+            if (image && image.image_url) {
+              workflowHtml += `
+                <div class="workflow-panel">
+                  <h4>Imagem gerada</h4>
+                  <img class="workflow-image" src="${escapeHtml(image.image_url)}" alt="Imagem do post" />
+              `;
+              if (mode === "image_review") {
+                workflowHtml += `
+                  <div class="workflow-actions">
+                    <button type="button" class="wf-btn wf-btn-approve" onclick="approveImage()">Aprovar imagem</button>
+                    <button type="button" class="wf-btn wf-btn-image" onclick="regenerateImage()">Regenerar imagem</button>
+                  </div>
+                `;
+              }
+              workflowHtml += `</div>`;
+            }
+
+            const tasks = Array.isArray(data.team_tasks) ? data.team_tasks : [];
+            const taskCards = tasks.map((task) => {
+              const summary = escapeHtml((task.summary || "").slice(0, 500));
+              const name = escapeHtml(task.agent_name || "Agente");
+              return `<article class="team-card"><h4>${name}</h4><pre>${summary}</pre></article>`;
+            }).join("");
+
+            let linkedinLink = "";
+            if (data.agent_url && mode === "completed") {
+              linkedinLink = `<a class="forward-btn" href="${escapeHtml(data.agent_url)}">Publicar no LinkedIn (OAuth)</a>`;
+            }
+
+            result.innerHTML = `
+              <h3>Painel do Diretor</h3>
+              ${plan}
+              <p><strong>Etapa:</strong> ${escapeHtml(stageLabel)}</p>
+              ${workflowHtml}
+              ${taskCards ? `<div class="team-panel">${taskCards}</div>` : ""}
+              ${linkedinLink}
+              ${pending.length ? `<p class="hint">Acções: ${pending.map(escapeHtml).join(", ")}</p>` : ""}
+            `;
+          }
+
+          window.approveCopy = () => directorAction("approve_copy", {}, "Aprovo a copy.");
+          window.saveCopyEdit = () => {
+            const el = document.getElementById("workflowPostBody");
+            const body = el ? el.value.trim() : "";
+            directorAction("edit_copy", { body }, "Editei a copy.");
+          };
+          window.generateImage = () => directorAction("generate_image", {}, "Gera a imagem.");
+          window.skipImage = () => directorAction("skip_image", {}, "Sem imagem.");
+          window.approveImage = () => directorAction("approve_image", {}, "Aprovo a imagem.");
+          window.regenerateImage = () => {
+            const instr = window.prompt("Instruções para a nova imagem (opcional):") || "";
+            directorAction("regenerate_image", { edit_instructions: instr }, "Regenerar imagem.");
+          };
+
+          async function sendMessage() {
+            const content = chatInput.value.trim();
+            if (!content) return;
+            addMessage("user", content);
+            chatInput.value = "";
+            await callDirector(buildPayload());
+          }
+
+          function resetChat() {
+            messages.length = 0;
+            workflowState = null;
+            chatLog.innerHTML = "";
+            result.innerHTML = "<p>Conversa reiniciada.</p>";
+            addMessage("assistant", "Olá! Descreve a campanha (canais, objetivo, público). Eu preparo a copy, peço a tua aprovação e só depois gero a imagem.");
+          }
+
+          addMessage("assistant", "Olá! Descreve a campanha (canais, objetivo, público). Eu preparo a copy, peço a tua aprovação e só depois gero a imagem.");
           chatInput.addEventListener("keydown", (event) => {
             if (event.key === "Enter" && !event.shiftKey) {
               event.preventDefault();
@@ -2264,7 +2338,13 @@ def director_chat_reply(payload: DirectorChatTurnRequest) -> Dict[str, object]:
 
     try:
         history = [{"role": item.role, "content": item.content} for item in payload.messages]
-        decision = director.generate_chat_reply(messages=history, language=payload.language)
+        decision = director.generate_chat_reply(
+            messages=history,
+            language=payload.language,
+            workflow_state=payload.workflow_state,
+            user_action=payload.user_action,
+            action_payload=payload.action_payload,
+        )
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001 — expor mensagem genérica ao cliente
@@ -2285,6 +2365,9 @@ def director_chat_reply(payload: DirectorChatTurnRequest) -> Dict[str, object]:
         "ready_to_route": bool(decision.get("ready_to_route", False)),
         "agent_name": agent_name,
         "agent_url": agent_url,
+        "workflow_state": decision.get("workflow_state"),
+        "deliverables": decision.get("deliverables"),
+        "pending_actions": decision.get("pending_actions", []),
     }
 
 
