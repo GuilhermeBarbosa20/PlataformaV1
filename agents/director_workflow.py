@@ -37,6 +37,45 @@ ACTION_APPROVE_IMAGE = "approve_image"
 ACTION_REGENERATE_IMAGE = "regenerate_image"
 ACTION_START_CAMPAIGN = "start_campaign"
 
+DIRECTOR_INTERNAL_AGENTS = ("Agente Copywriter", "Agente Designer")
+
+INSTAGRAM_REDIRECT_AGENT = "Agente Redes sociais"
+LINKEDIN_REDIRECT_AGENTS = frozenset({"Agente LinkedIn (perfil)", "Agente Linkedin Ads"})
+
+_PLATFORM_OPERATION_MARKERS = (
+    "analisar",
+    "analise",
+    "auditar",
+    "auditoria",
+    "publicar",
+    "publicacao",
+    "calendario",
+    "oauth",
+    "login",
+    "ligar",
+    "conectar",
+    "perfil",
+    "metricas",
+    "indicadores",
+    "seguidores",
+    "engagement",
+    "conta",
+    "harvest",
+    "linkedin.com",
+)
+
+_INSTAGRAM_MARKERS = (
+    "instagram",
+    "insta",
+    "reels",
+    "stories",
+    "tiktok",
+    "meta ads",
+    "facebook ads",
+    "facebook",
+    "business manager",
+)
+
 
 def _new_workflow_state() -> Dict[str, Any]:
     """Inicializa estado vazio do fluxo do Diretor."""
@@ -133,19 +172,117 @@ def _copy_summary_for_ui(copy_payload: Dict[str, Any], post: Dict[str, Any]) -> 
     return "\n".join(lines).strip()
 
 
-def _channels_from_assignments(assignments: Sequence[Dict[str, str]]) -> List[str]:
-    """Extrai canais a partir dos agentes mobilizados."""
+def _channels_from_assignments(assignments: Sequence[Dict[str, str]], conversation: str) -> List[str]:
+    """Infere canal alvo a partir do brief (sem mobilizar agentes de rede)."""
 
+    normalized = conversation.lower()
     channels: List[str] = []
-    for item in assignments:
-        name = str(item.get("agent_name", ""))
-        if "LinkedIn" in name and "linkedin" not in channels:
-            channels.append("linkedin")
-        if name in {"Agente Meta Ads", "Agente Redes sociais"} and "meta" not in channels:
-            channels.append("meta")
-    if not channels:
+    if "linkedin" in normalized:
         channels.append("linkedin")
+    if any(m in normalized for m in ("instagram", "insta", "meta", "facebook", "reels")):
+        channels.append("meta")
+    if not channels:
+        channels.append("geral")
     return channels
+
+
+def _is_copy_or_design_request(normalized: str) -> bool:
+    """Deteta pedidos de copy/criativo sem operação de plataforma."""
+
+    creative_markers = (
+        "copy",
+        "texto",
+        "legenda",
+        "headline",
+        "imagem",
+        "criativo",
+        "campanha",
+        "post",
+        "anuncio",
+        "publicidade",
+        "slogan",
+    )
+    has_creative = any(marker in normalized for marker in creative_markers)
+    has_platform_ops = any(marker in normalized for marker in _PLATFORM_OPERATION_MARKERS)
+    return has_creative and not has_platform_ops
+
+
+def resolve_specialist_redirect(
+    normalized: str,
+    raw_text: str,
+    keyword_agents: Sequence[str],
+    resolve_linkedin: Callable[[str], Any],
+    correct_linkedin_agent: Callable[[str, str], str],
+) -> Optional[str]:
+    """Decide se o pedido deve ir para Instagram/LinkedIn em vez do fluxo copy+design.
+
+    Argumentos:
+        normalized: Última mensagem do utilizador normalizada.
+        raw_text: Texto original do utilizador.
+        keyword_agents: Agentes sugeridos por keywords.
+        resolve_linkedin: Função de desambiguação LinkedIn.
+        correct_linkedin_agent: Correcção perfil vs ads LinkedIn.
+
+    Retorno:
+        Nome do agente especializado para redireccionamento, ou ``None``.
+    """
+
+    if _is_copy_or_design_request(normalized):
+        return None
+
+    for agent in keyword_agents:
+        if agent == INSTAGRAM_REDIRECT_AGENT:
+            return INSTAGRAM_REDIRECT_AGENT
+
+    linkedin_route = resolve_linkedin(normalized)
+    if linkedin_route is not None:
+        agent_name, _ = linkedin_route
+        return correct_linkedin_agent(raw_text, agent_name)
+
+    for agent in keyword_agents:
+        if agent in LINKEDIN_REDIRECT_AGENTS:
+            return correct_linkedin_agent(raw_text, agent)
+
+    if any(marker in normalized for marker in _INSTAGRAM_MARKERS):
+        if any(marker in normalized for marker in _PLATFORM_OPERATION_MARKERS):
+            return INSTAGRAM_REDIRECT_AGENT
+        if not _is_copy_or_design_request(normalized):
+            return INSTAGRAM_REDIRECT_AGENT
+
+    if "linkedin" in normalized and any(marker in normalized for marker in _PLATFORM_OPERATION_MARKERS):
+        return correct_linkedin_agent(raw_text, "Agente LinkedIn (perfil)")
+
+    return None
+
+
+def _build_redirect_response(
+    agent_name: str,
+    agent_page_url: Callable[[str], str],
+) -> Dict[str, Any]:
+    """Monta resposta de encaminhamento para agente Instagram ou LinkedIn."""
+
+    labels = {
+        INSTAGRAM_REDIRECT_AGENT: "Instagram / redes sociais",
+        "Agente LinkedIn (perfil)": "LinkedIn (perfil, posts e calendário)",
+        "Agente Linkedin Ads": "LinkedIn Ads",
+    }
+    label = labels.get(agent_name, agent_name)
+    return {
+        "reply": (
+            f"Para {label}, o trabalho operacional fica no agente especializado. "
+            "Aqui no Diretor trato só de **copy** e **imagem** (Designer). "
+            "Clica no botão abaixo para continuar com o especialista certo."
+        ),
+        "orchestration_mode": "redirect",
+        "execution_plan": "",
+        "team_tasks": [],
+        "agents_involved": [agent_name],
+        "ready_to_route": True,
+        "agent_name": agent_name,
+        "workflow_state": _new_workflow_state(),
+        "deliverables": {"post": None, "copy": None, "image": None},
+        "pending_actions": [],
+    }
 
 
 def _generate_campaign_copy(
@@ -285,13 +422,7 @@ def process_director_turn(
     if action == ACTION_SKIP_IMAGE and state["stage"] == STAGE_IMAGE_CONFIRM:
         state["stage"] = STAGE_COMPLETED
         state["pending_actions"] = []
-        publish_hint = ""
-        if "linkedin" in (state.get("channels") or []):
-            publish_hint = (
-                " Para publicar no LinkedIn com OAuth e calendário, abre o "
-                "Agente LinkedIn (perfil) — o pacote de copy fica pronto aqui."
-            )
-        base_response["reply"] = f"Perfeito — ficamos só com a copy aprovada.{publish_hint}"
+        base_response["reply"] = "Perfeito — pacote concluído só com a copy aprovada."
         base_response["orchestration_mode"] = STAGE_COMPLETED
         base_response["workflow_state"] = state
         return base_response
@@ -346,12 +477,7 @@ def process_director_turn(
         if post:
             post["status"] = "ready"
             state["post"] = post
-        linkedin_url = agent_page_url("Agente LinkedIn (perfil)")
-        base_response["reply"] = (
-            "Pacote completo: copy e imagem aprovados. "
-            f"Para publicar no LinkedIn (OAuth, calendário, aprovações finais na rede), "
-            f"usa o agente dedicado: {linkedin_url}"
-        )
+        base_response["reply"] = "Pacote concluído: copy e imagem aprovados. Podes reutilizar estes materiais na tua campanha."
         base_response["orchestration_mode"] = STAGE_COMPLETED
         base_response["workflow_state"] = state
         base_response["deliverables"] = {
@@ -359,8 +485,7 @@ def process_director_turn(
             "copy": state.get("copy"),
             "image": state.get("image"),
         }
-        base_response["agent_name"] = "Agente LinkedIn (perfil)"
-        base_response["ready_to_route"] = True
+        base_response["ready_to_route"] = False
         return base_response
 
     # Se já estamos numa etapa de revisão, não voltar a gerar copy sem pedido novo
@@ -383,14 +508,26 @@ def process_director_turn(
     if keyword_agents:
         keyword_agents = [correct_linkedin_agent(last_user_text, n) for n in keyword_agents]
 
+    redirect_agent = resolve_specialist_redirect(
+        normalized_last,
+        last_user_text,
+        keyword_agents,
+        resolve_linkedin,
+        correct_linkedin_agent,
+    )
+    if redirect_agent:
+        return _build_redirect_response(redirect_agent, agent_page_url)
+
+    internal_keywords = [name for name in keyword_agents if name in DIRECTOR_INTERNAL_AGENTS]
+
     plan = plan_team_with_llm(
         client=client,
         model=openai_model,
-        agent_catalog=agent_catalog,
+        agent_catalog=DIRECTOR_INTERNAL_AGENTS,
         linkedin_guidance=linkedin_guidance,
         messages=sanitized,
         language=language,
-        keyword_agents=keyword_agents,
+        keyword_agents=internal_keywords,
     )
 
     reply_seed = str(plan.get("reply", "")).strip()
@@ -401,7 +538,7 @@ def process_director_turn(
     if needs_clarification or not assignments:
         state["stage"] = STAGE_PLANNING
         state["execution_plan"] = execution_plan
-        base_response["reply"] = reply_seed or "Indica objetivo, canais (ex. LinkedIn + Meta) e público-alvo."
+        base_response["reply"] = reply_seed or "Indica objetivo, público e tom para eu preparar copy e imagem."
         base_response["orchestration_mode"] = STAGE_PLANNING
         base_response["workflow_state"] = state
         return base_response
@@ -413,9 +550,9 @@ def process_director_turn(
             copy_brief = str(item.get("task_brief", "")).strip() or copy_brief
             break
 
-    state["channels"] = _channels_from_assignments(assignments)
+    state["channels"] = _channels_from_assignments(assignments, conversation)
     state["execution_plan"] = execution_plan
-    channel = state["channels"][0] if state["channels"] else "linkedin"
+    channel = state["channels"][0] if state["channels"] else "geral"
 
     try:
         copy_result = _generate_campaign_copy(conversation, copy_brief, language)

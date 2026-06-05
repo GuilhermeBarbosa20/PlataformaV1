@@ -2035,7 +2035,7 @@ def home() -> str:
               </div>
               <div>
                 <h1 class="title">Diretor de Marketing · Chatroom</h1>
-                <p class="subtitle">Tudo aqui: campanha → copy → tu aprovas → imagem → tu aprovas. Publicação OAuth/calendário LinkedIn no agente dedicado.</p>
+                <p class="subtitle">Aqui: copy → aprovas → imagem → aprovas. Instagram e LinkedIn (perfil, posts, calendário) abrem no agente de redes / LinkedIn.</p>
               </div>
             </div>
 
@@ -2048,7 +2048,7 @@ def home() -> str:
               <button type="button" class="send-btn" onclick="sendMessage()">Enviar</button>
               <button type="button" class="reset-btn" onclick="resetChat()">Limpar conversa</button>
             </div>
-            <p class="hint">Fluxo: 1) Aprovar copy 2) Gerar imagem 3) Aprovar imagem. Também podes escrever «aprovo» ou «gera imagem».</p>
+            <p class="hint">Copy + imagem aqui. Para Instagram ou gestão LinkedIn, o Diretor encaminha para o agente certo.</p>
             <div id="result" class="result"></div>
           </section>
           <footer>PlataformaV1 · Diretor de Marketing AI</footer>
@@ -2165,15 +2165,17 @@ def home() -> str:
               image_confirm: "Confirmar imagem",
               image_review: "Revisão de imagem",
               completed: "Concluído",
+              redirect: "Encaminhamento",
               idle: "Início"
             }[mode] || mode;
             const stageHint = {
-              planning: "Indica objetivo, canais e público para eu preparar a campanha.",
-              copy_review: "Passo 1 de 2: revê o texto do post, edita se precisares e clica em «Aprovar copy». A imagem só vem a seguir.",
-              image_confirm: "Passo 2 de 2: copy aprovada. Queres que eu gere o criativo visual para o post?",
-              image_review: "Revê a imagem abaixo. Aprova ou pede para regenerar com novas instruções.",
-              completed: "Pacote concluído. Podes publicar no LinkedIn pelo agente dedicado.",
-              idle: "Descreve o que pretendes fazer."
+              planning: "Indica objetivo, público e tom para eu preparar copy e imagem.",
+              copy_review: "Passo 1 de 2: revê o texto, edita se precisares e clica em «Aprovar copy».",
+              image_confirm: "Passo 2 de 2: copy aprovada. Queres o criativo visual?",
+              image_review: "Revê a imagem. Aprova ou regenera com novas instruções.",
+              completed: "Copy e imagem concluídos.",
+              redirect: "Este pedido é do agente especializado — continua na página dele.",
+              idle: "Copy e imagem aqui; Instagram/LinkedIn operacional no agente dedicado."
             }[mode] || "";
 
             let workflowHtml = "";
@@ -2227,9 +2229,14 @@ def home() -> str:
               workflowHtml += `</div>`;
             }
 
-            let linkedinLink = "";
-            if (data.agent_url && mode === "completed") {
-              linkedinLink = `<a class="forward-btn" href="${escapeHtml(data.agent_url)}">Publicar no LinkedIn (OAuth)</a>`;
+            let redirectHtml = "";
+            if (data.ready_to_route && data.agent_url && data.agent_name) {
+              const agentLabel = escapeHtml(data.agent_name);
+              redirectHtml = `
+                <div class="workflow-actions" style="margin-top:12px">
+                  <a class="forward-btn" href="${escapeHtml(data.agent_url)}">Ir para ${agentLabel}</a>
+                </div>
+              `;
             }
 
             result.innerHTML = `
@@ -2237,8 +2244,8 @@ def home() -> str:
               ${plan}
               <p><strong>Etapa:</strong> ${escapeHtml(stageLabel)}</p>
               ${stageHint ? `<p class="stage-hint">${escapeHtml(stageHint)}</p>` : ""}
+              ${redirectHtml}
               ${workflowHtml}
-              ${linkedinLink}
             `;
           }
 
@@ -2269,10 +2276,10 @@ def home() -> str:
             workflowState = null;
             chatLog.innerHTML = "";
             result.innerHTML = "<p>Conversa reiniciada.</p>";
-            addMessage("assistant", "Olá! Descreve a campanha (canais, objetivo, público). Eu preparo a copy, peço a tua aprovação e só depois gero a imagem.");
+            addMessage("assistant", "Olá! Para copy e imagem fico aqui contigo. Para Instagram ou LinkedIn (perfil, posts, calendário), encaminho-te para o agente certo.");
           }
 
-          addMessage("assistant", "Olá! Descreve a campanha (canais, objetivo, público). Eu preparo a copy, peço a tua aprovação e só depois gero a imagem.");
+          addMessage("assistant", "Olá! Para copy e imagem fico aqui contigo. Para Instagram ou LinkedIn (perfil, posts, calendário), encaminho-te para o agente certo.");
           chatInput.addEventListener("keydown", (event) => {
             if (event.key === "Enter" && !event.shiftKey) {
               event.preventDefault();

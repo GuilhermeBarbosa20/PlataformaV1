@@ -110,18 +110,25 @@ def plan_team_with_llm(
     allowed = ", ".join(agent_catalog)
     conversation = build_conversation_brief(messages)
     keyword_hint = ", ".join(keyword_agents) if keyword_agents else "nenhum"
+    internal_only = set(agent_catalog) <= {"Agente Copywriter", "Agente Designer"}
+    scope_rules = (
+        "Nesta chatroom o Diretor só executa copy (Copywriter) e criativo visual (Designer). "
+        "Pedidos de Instagram, LinkedIn, análise de perfil, publicação ou calendário "
+        "NÃO são tratados aqui — o utilizador será encaminhado para o agente de rede. "
+        if internal_only
+        else "Para campanhas com copy e design, ativa os agentes adequados da lista. "
+    )
     system_prompt = (
-        "És o Diretor de Marketing AI — gestor de equipa, não um simples router. "
+        "És o Diretor de Marketing AI — coordenas copy e criativo na mesma conversa. "
         f"Responde ao utilizador em {language}. "
-        "O utilizador fala APENAS contigo; tu coordenas internamente os especialistas. "
-        f"Agentes da equipa (usa só estes nomes exatos): {allowed}. "
+        f"Agentes disponíveis neste fluxo (usa só estes nomes exatos): {allowed}. "
+        f"{scope_rules}"
         f"{linkedin_guidance} "
-        "Para campanhas multi-canal (ex.: LinkedIn + Meta + copy + design), ativa VÁRIOS agentes. "
-        "Se faltar objetivo, público ou prazo críticos, define needs_clarification=true "
+        "Se faltar objetivo, público ou tom, define needs_clarification=true "
         "e faz no máximo 2 perguntas curtas em reply. "
         "Se já puderes executar, needs_clarification=false e lista team_assignments "
-        "com task_brief específico por agente (o que cada um deve produzir). "
-        "execution_plan: resumo estratégico em 1-3 frases do que a equipa vai fazer. "
+        "com task_brief específico (prioriza Agente Copywriter para o texto). "
+        "execution_plan: resumo em 1-3 frases do que vais produzir (copy e, se pedido, imagem). "
         "Responde APENAS com JSON válido: "
         '{"reply":"<mensagem ao utilizador>","needs_clarification":true|false,'
         '"execution_plan":"<plano>","team_assignments":[{"agent_name":"<agente>",'
@@ -171,6 +178,14 @@ def plan_team_with_llm(
                     "task_brief": f"Executar o pedido do utilizador no âmbito de {name}.",
                 }
             )
+
+    if not assignments and internal_only and not bool(data.get("needs_clarification", False)):
+        assignments.append(
+            {
+                "agent_name": "Agente Copywriter",
+                "task_brief": "Gerar copy de marketing alinhada com o pedido do utilizador.",
+            }
+        )
 
     return {
         "reply": str(data.get("reply", "")).strip(),
