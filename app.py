@@ -2086,6 +2086,36 @@ def home() -> str:
           .li-btn-analyze { background: linear-gradient(180deg, #10b981, #059669); }
           .li-btn-logout { background: linear-gradient(180deg, #64748b, #475569); }
           .linkedin-profile-hint { margin: 0 0 8px; font-size: 0.8rem; color: #94a3b8; min-height: 1.2em; }
+          .calendar-panel {
+            margin-top: 12px;
+            padding: 14px;
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            background: rgba(30, 41, 59, 0.55);
+          }
+          .calendar-panel h4 { margin: 0 0 10px; color: #e2e8f0; }
+          .cal-row {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 10px;
+            padding: 10px 0;
+            border-bottom: 1px solid rgba(255,255,255,0.06);
+          }
+          .cal-row:last-child { border-bottom: none; }
+          .cal-row.is-ready { opacity: 0.72; }
+          .cal-row.is-active { background: rgba(14, 165, 233, 0.08); border-radius: 8px; padding: 10px; }
+          .cal-meta { font-size: 0.82rem; color: #94a3b8; }
+          .cal-title { font-size: 0.9rem; color: #e2e8f0; font-weight: 600; margin-top: 4px; }
+          .cal-status {
+            font-size: 0.72rem;
+            padding: 3px 8px;
+            border-radius: 999px;
+            background: rgba(148, 163, 184, 0.2);
+            color: #cbd5e1;
+            white-space: nowrap;
+          }
+          .cal-status.ready { background: rgba(16, 185, 129, 0.2); color: #6ee7b7; }
           .profile-panel {
             margin-top: 12px;
             padding: 12px 14px;
@@ -2412,15 +2442,32 @@ def home() -> str:
               if (data.profile_url) {
                 localStorage.setItem(DIRECTOR_LINKEDIN_PROFILE_KEY, data.profile_url);
               }
+              const profile = data.public_profile_data || {};
+              const enrichment = profile.apify_enrichment || {};
               const slim = {
                 profile_url: data.profile_url,
-                linkedin_own_profile: data.linkedin_own_profile,
+                linkedin_own_profile: true,
+                linkedin_page_kind: data.linkedin_page_kind,
                 metricas_linkedin: data.metricas_linkedin || data.metricas_instagram || {},
                 metricas_universais: data.metricas_universais || {},
                 principais_insights: (data.principais_insights || []).slice(0, 6),
                 problemas_identificados: (data.problemas_identificados || []).slice(0, 5),
-                oportunidades: (data.oportunidades || []).slice(0, 5),
+                oportunidades: (data.oportunidades || []).slice(0, 6),
                 acoes_prioritarias: (data.acoes_prioritarias || []).slice(0, 5),
+                ideias_conteudo: (data.ideias_conteudo || []).slice(0, 8),
+                plano_crescimento_curto_prazo: (data.plano_crescimento_curto_prazo || []).slice(0, 6),
+                posting_cadence: enrichment.posting_cadence || {},
+                content_type_distribution: enrichment.content_type_distribution || enrichment.format_distribution || {},
+                public_profile_data: {
+                  profile_url: profile.profile_url || data.profile_url,
+                  headline: profile.headline || enrichment.headline,
+                  summary: profile.summary || enrichment.summary,
+                  apify_enrichment: {
+                    content_type_distribution: enrichment.content_type_distribution || enrichment.format_distribution,
+                    posting_cadence: enrichment.posting_cadence,
+                    top_posts: (enrichment.top_posts || []).slice(0, 3),
+                  },
+                },
               };
               workflowState.linkedin_analysis = slim;
               workflowState.channels = ["linkedin"];
@@ -2559,6 +2606,29 @@ def home() -> str:
               </div>`;
           }
 
+          function renderCalendarPanel(calendar, activePostId) {
+            if (!calendar || !calendar.length) return "";
+            const rows = calendar.map((entry) => {
+              const post = entry.post || {};
+              const status = entry.status || "draft";
+              const isActive = activePostId && String(entry.post_id) === String(activePostId);
+              const cls = `cal-row${status === "ready" ? " is-ready" : ""}${isActive ? " is-active" : ""}`;
+              const statusLabel = status === "ready" ? "Pronto" : "Rascunho";
+              const pillar = entry.pillar_theme ? ` · ${entry.pillar_theme}` : "";
+              return `<div class="${cls}">
+                <div>
+                  <div class="cal-meta">${escapeHtml(entry.scheduled_label || entry.scheduled_date || "")}${escapeHtml(pillar)}</div>
+                  <div class="cal-title">${escapeHtml(post.title || "Post LinkedIn")}</div>
+                </div>
+                <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px">
+                  <span class="cal-status ${status === "ready" ? "ready" : ""}">${escapeHtml(statusLabel)}</span>
+                  ${status !== "ready" ? `<button type="button" class="wf-btn wf-btn-strategy" style="padding:6px 10px;font-size:0.75rem" onclick='selectCalendarPost(${JSON.stringify(String(entry.post_id || ""))})'>Rever</button>` : ""}
+                </div>
+              </div>`;
+            }).join("");
+            return `<div class="calendar-panel"><h4>Calendário da semana</h4>${rows}</div>`;
+          }
+
           function renderProfilePanel(snapshot) {
             if (!snapshot || !snapshot.profile_url) return "";
             const metrics = snapshot.metricas_linkedin || {};
@@ -2584,12 +2654,16 @@ def home() -> str:
             const strategy = deliverables.strategy || (workflowState && workflowState.strategy) || null;
             const linkedinAnalysis = deliverables.linkedin_analysis
               || (workflowState && workflowState.linkedin_analysis) || null;
+            const calendar = deliverables.linkedin_calendar
+              || (workflowState && workflowState.linkedin_calendar) || [];
             const post = deliverables.post || (workflowState && workflowState.post) || null;
             const image = deliverables.image || (workflowState && workflowState.image) || null;
+            const activePostId = post && post.id ? post.id : null;
             const stageLabel = {
               strategy_brief: "Brief estratégico",
               strategy_review: "Revisão de estratégia",
               strategy_approved: "Estratégia aprovada",
+              posts_review: "Calendário de posts",
               planning: "Planeamento",
               copy_review: "Revisão de copy",
               image_confirm: "Confirmar imagem",
@@ -2601,9 +2675,12 @@ def home() -> str:
             const stageHint = {
               strategy_brief: "Ainda faltam dados. Completa objetivos SMART, ICP e métricas no chat.",
               strategy_review: "Plano estratégico abaixo. Aprova ou pede ajustes antes dos posts.",
-              strategy_approved: "Estratégia fechada. Inicia a execução para o primeiro post.",
+              strategy_approved: "Estratégia fechada. Inicia a execução para gerar os posts da semana.",
+              posts_review: "Escolhe o próximo post no calendário para rever copy e imagem.",
               planning: "Indica objetivo, público e tom para eu preparar copy e imagem.",
-              copy_review: "Passo 1 de 2: revê o texto, edita se precisares e clica em «Aprovar copy».",
+              copy_review: calendar.length
+                ? "Revisa o post do dia: copy → imagem → próximo no calendário."
+                : "Passo 1 de 2: revê o texto, edita se precisares e clica em «Aprovar copy».",
               image_confirm: "Passo 2 de 2: copy aprovada. Queres o criativo visual?",
               image_review: "Revê a imagem. Aprova ou regenera com novas instruções.",
               completed: "Copy e imagem concluídos.",
@@ -2611,7 +2688,9 @@ def home() -> str:
               idle: "Começa por definir a tua estratégia LinkedIn ou pede copy/imagem."
             }[mode] || "";
 
-            let workflowHtml = renderProfilePanel(linkedinAnalysis) + renderStrategyPanel(strategy, mode);
+            let workflowHtml = renderProfilePanel(linkedinAnalysis)
+              + renderStrategyPanel(strategy, mode)
+              + renderCalendarPanel(calendar, activePostId);
             if (post && post.body) {
               const readonly = mode !== "copy_review";
               const metaParts = [];
@@ -2632,6 +2711,7 @@ def home() -> str:
                   <div class="workflow-actions">
                     <button type="button" class="wf-btn wf-btn-approve" onclick="approveCopy()">Aprovar copy</button>
                     <button type="button" class="wf-btn wf-btn-secondary" onclick="saveCopyEdit()">Guardar edição</button>
+                    ${calendar.length ? `<button type="button" class="wf-btn wf-btn-image" onclick="regenerateLinkedinPost()">Refazer post</button>` : ""}
                   </div>
                 `;
               }
@@ -2697,6 +2777,15 @@ def home() -> str:
             const instr = window.prompt("Instruções para a nova imagem (opcional):") || "";
             directorAction("regenerate_image", { edit_instructions: instr }, "Regenerar imagem.");
           };
+          window.selectCalendarPost = (postId) => directorAction(
+            "select_post",
+            { post_id: postId },
+            "Quero rever este post do calendário."
+          );
+          window.regenerateLinkedinPost = () => {
+            const instr = window.prompt("O que queres mudar neste post? (opcional)") || "";
+            directorAction("regenerate_linkedin_post", { edit_instructions: instr }, "Refazer post LinkedIn.");
+          };
 
           async function sendMessage() {
             const content = chatInput.value.trim();
@@ -2720,13 +2809,14 @@ def home() -> str:
           (async function bootstrapDirectorPage() {
             await initDirectorSupabaseFromUrl();
             await refreshDirectorLinkedinAuth();
-            if (workflowState && (workflowState.strategy || workflowState.linkedin_analysis)) {
+            if (workflowState && (workflowState.strategy || workflowState.linkedin_analysis || workflowState.linkedin_calendar)) {
               renderDirectorPanel({
                 orchestration_mode: workflowState.stage || "idle",
                 execution_plan: workflowState.execution_plan || "",
                 deliverables: {
                   strategy: workflowState.strategy,
                   linkedin_analysis: workflowState.linkedin_analysis,
+                  linkedin_calendar: workflowState.linkedin_calendar,
                   post: workflowState.post,
                   image: workflowState.image,
                 },

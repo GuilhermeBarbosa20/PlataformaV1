@@ -15,7 +15,12 @@ from openai import OpenAI
 
 from agents.copywriter import copywriter_agent
 from agents.designer import designer_agent
-from agents.director_linkedin import profile_context_markdown
+from agents.director_linkedin import (
+    editor_post_from_linkedin,
+    generate_director_linkedin_posts,
+    profile_context_markdown,
+    regenerate_director_linkedin_post,
+)
 from agents.director_strategy import (
     generate_linkedin_strategy,
     is_linkedin_strategy_intent,
@@ -34,6 +39,7 @@ STAGE_IDLE = "idle"
 STAGE_STRATEGY_BRIEF = "strategy_brief"
 STAGE_STRATEGY_REVIEW = "strategy_review"
 STAGE_STRATEGY_APPROVED = "strategy_approved"
+STAGE_POSTS_REVIEW = "posts_review"
 STAGE_PLANNING = "planning"
 STAGE_COPY_REVIEW = "copy_review"
 STAGE_IMAGE_CONFIRM = "image_confirm"
@@ -43,6 +49,8 @@ STAGE_COMPLETED = "completed"
 ACTION_APPROVE_STRATEGY = "approve_strategy"
 ACTION_START_EXECUTION = "start_execution"
 ACTION_ANALYZE_LINKEDIN = "analyze_linkedin_profile"
+ACTION_SELECT_POST = "select_post"
+ACTION_REGENERATE_LINKEDIN_POST = "regenerate_linkedin_post"
 ACTION_APPROVE_COPY = "approve_copy"
 ACTION_EDIT_COPY = "edit_copy"
 ACTION_GENERATE_IMAGE = "generate_image"
@@ -102,6 +110,9 @@ def _new_workflow_state() -> Dict[str, Any]:
         "linkedin_connected": False,
         "linkedin_profile_url": "",
         "linkedin_analysis": None,
+        "linkedin_posts": [],
+        "linkedin_calendar": [],
+        "active_post_index": 0,
         "post": None,
         "copy": None,
         "image": None,
@@ -121,6 +132,7 @@ def normalize_workflow_state(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         STAGE_STRATEGY_BRIEF,
         STAGE_STRATEGY_REVIEW,
         STAGE_STRATEGY_APPROVED,
+        STAGE_POSTS_REVIEW,
         STAGE_PLANNING,
         STAGE_COPY_REVIEW,
         STAGE_IMAGE_CONFIRM,
@@ -136,6 +148,14 @@ def normalize_workflow_state(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     state["linkedin_profile_url"] = str(raw.get("linkedin_profile_url") or "").strip()
     if isinstance(raw.get("linkedin_analysis"), dict):
         state["linkedin_analysis"] = raw["linkedin_analysis"]
+    posts = raw.get("linkedin_posts")
+    state["linkedin_posts"] = posts if isinstance(posts, list) else []
+    calendar = raw.get("linkedin_calendar")
+    state["linkedin_calendar"] = calendar if isinstance(calendar, list) else []
+    try:
+        state["active_post_index"] = int(raw.get("active_post_index") or 0)
+    except (TypeError, ValueError):
+        state["active_post_index"] = 0
     if isinstance(raw.get("post"), dict):
         state["post"] = raw["post"]
     if isinstance(raw.get("copy"), dict):
@@ -391,6 +411,9 @@ def _deliverables_from_state(state: Dict[str, Any]) -> Dict[str, Any]:
         "linkedin_analysis": state.get("linkedin_analysis"),
         "linkedin_connected": state.get("linkedin_connected"),
         "linkedin_profile_url": state.get("linkedin_profile_url"),
+        "linkedin_posts": state.get("linkedin_posts") or [],
+        "linkedin_calendar": state.get("linkedin_calendar") or [],
+        "active_post_index": state.get("active_post_index", 0),
         "post": state.get("post"),
         "copy": state.get("copy"),
         "image": state.get("image"),
@@ -475,6 +498,164 @@ def _generate_and_review_strategy(
         "deliverables": _deliverables_from_state(state),
         "agents_involved": [],
     }
+
+
+def _sync_calendar_entry(
+    state: Dict[str, Any],
+    post_id: str,
+    post_data: Dict[str, Any],
+    *,
+    status: Optional[str] = None,
+) -> None:
+    """Actualiza um post no calendário editorial do Diretor."""
+
+    calendar = state.get("linkedin_calendar") or []
+    for entry in calendar:
+        if str(entry.get("post_id")) == str(post_id):
+            entry["post"] = post_data
+            if status:
+                entry["status"] = status
+            break
+    state["linkedin_calendar"] = calendar
+
+
+def _advance_after_post_packaged(state: Dict[str, Any]) -> str:
+    """Marca post do calendário como pronto e indica próximo passo.
+
+    Argumentos:
+        state: Estado mutável do workflow.
+
+    Retorno:
+        Mensagem ao utilizador sobre progresso da semana.
+    """
+
+    post = state.get("post") or {}
+    post_id = str(post.get("id") or "")
+    if post_id:
+        packaged = dict(post)
+        packaged["status"] = "ready"
+        state["post"] = packaged
+        _sync_calendar_entry(state, post_id, packaged, status="ready")
+
+    state["image"] = None
+    state["copy"] = None
+    calendar = state.get("linkedin_calendar") or []
+    if not calendar:
+        state["stage"] = STAGE_COMPLETED
+        state["pending_actions"] = []
+        return "Pacote do post concluído."
+
+    ready_count = sum(1 for e in calendar if e.get("status") == "ready")
+    total = len(calendar)
+    if ready_count >= total:
+        state["stage"] = STAGE_COMPLETED
+        state["pending_actions"] = []
+        return f"Semana concluída — {total} posts revistos e prontos no calendário."
+
+    state["stage"] = STAGE_POSTS_REVIEW
+    state["pending_actions"] = [ACTION_SELECT_POST]
+    state["post"] = None
+    return (
+        f"Post concluído ({ready_count}/{total}). "
+        "Escolhe o próximo dia no calendário abaixo."
+    )
+
+
+def _select_calendar_post(state: Dict[str, Any], post_id: str) -> bool:
+    """Carrega um post do calendário para revisão de copy/imagem.
+
+    Argumentos:
+        state: Estado do workflow.
+        post_id: Identificador do post no calendário.
+
+    Retorno:
+        ``True`` se o post foi encontrado e carregado.
+    """
+
+    calendar = state.get("linkedin_calendar") or []
+    for idx, entry in enumerate(calendar):
+        if str(entry.get("post_id")) != str(post_id):
+            continue
+        raw = entry.get("post") if isinstance(entry.get("post"), dict) else {}
+        state["post"] = editor_post_from_linkedin(raw)
+        state["active_post_index"] = idx
+        state["stage"] = STAGE_COPY_REVIEW
+        state["pending_actions"] = [
+            ACTION_APPROVE_COPY,
+            ACTION_EDIT_COPY,
+            ACTION_REGENERATE_LINKEDIN_POST,
+        ]
+        state["image"] = None
+        state["copy"] = None
+        return True
+    return False
+
+
+def _start_execution_from_strategy(
+    *,
+    state: Dict[str, Any],
+    sanitized: Sequence[Dict[str, str]],
+    language: str,
+    reply_prefix: str = "",
+) -> Dict[str, Any]:
+    """Inicia execução: posts da semana (com análise) ou copy única (fallback).
+
+    Argumentos:
+        state: Estado com estratégia e opcionalmente análise LinkedIn.
+        sanitized: Histórico da conversa.
+        language: Idioma.
+        reply_prefix: Texto introdutório opcional.
+
+    Retorno:
+        Payload com posts/calendário ou copy única.
+
+    Raises:
+        RuntimeError: Falha na geração.
+    """
+
+    strategy = state.get("strategy") or {}
+    if state.get("linkedin_analysis") and strategy_has_core_content(strategy):
+        posts, calendar = generate_director_linkedin_posts(state, language)
+        state["linkedin_posts"] = posts
+        state["linkedin_calendar"] = calendar
+        if not calendar:
+            raise RuntimeError("Não consegui gerar posts para a semana.")
+        first = calendar[0]
+        state["post"] = editor_post_from_linkedin(first.get("post") or {})
+        state["active_post_index"] = 0
+        state["stage"] = STAGE_COPY_REVIEW
+        state["pending_actions"] = [
+            ACTION_APPROVE_COPY,
+            ACTION_EDIT_COPY,
+            ACTION_REGENERATE_LINKEDIN_POST,
+        ]
+        state["image"] = None
+        state["copy"] = None
+        prefix = f"{reply_prefix}\n\n" if reply_prefix else ""
+        count = len(calendar)
+        return {
+            "reply": (
+                f"{prefix}"
+                f"A equipa gerou **{count} posts** para a semana, alinhados com a tua estratégia. "
+                "Revê o calendário abaixo e o primeiro post — aprova a copy e depois a imagem."
+            ).strip(),
+            "orchestration_mode": STAGE_COPY_REVIEW,
+            "workflow_state": state,
+            "pending_actions": state["pending_actions"],
+            "deliverables": _deliverables_from_state(state),
+            "agents_involved": ["Agente LinkedIn (perfil)", "Agente Copywriter"],
+        }
+
+    prefix_note = (
+        "Nota: liga e analisa o perfil LinkedIn para gerar o calendário semanal completo. "
+        "Por agora preparei só um post com base na estratégia.\n\n"
+    )
+    return _start_copy_from_strategy(
+        state=state,
+        sanitized=sanitized,
+        language=language,
+        reply_prefix=f"{reply_prefix}\n\n{prefix_note}".strip() if reply_prefix else prefix_note.strip(),
+    )
 
 
 def _start_copy_from_strategy(
@@ -604,8 +785,8 @@ def process_director_turn(
         state["pending_actions"] = [ACTION_START_EXECUTION]
         strategy = state.get("strategy") or {}
         base_response["reply"] = (
-            "Estratégia aprovada. Quando quiseres, clica em «Iniciar execução» "
-            "para a equipa produzir o primeiro post alinhado com o plano."
+            "Estratégia aprovada. Clica em «Iniciar execução» para a equipa gerar "
+            "os posts da semana (se o perfil estiver analisado) ou o primeiro post."
         )
         base_response["orchestration_mode"] = STAGE_STRATEGY_APPROVED
         base_response["workflow_state"] = state
@@ -621,17 +802,18 @@ def process_director_turn(
         if state["stage"] == STAGE_STRATEGY_REVIEW:
             state["stage"] = STAGE_STRATEGY_APPROVED
         try:
-            result = _start_copy_from_strategy(
+            result = _start_execution_from_strategy(
                 state=state,
                 sanitized=sanitized,
                 language=language,
                 reply_prefix="Estratégia confirmada.",
             )
             base_response.update(result)
+            agents = result.get("agents_involved") or ["Agente Copywriter"]
             base_response["team_tasks"] = [
                 build_team_task_payload(
                     {
-                        "agent_name": "Agente Copywriter",
+                        "agent_name": agents[0],
                         "status": "completed",
                         "summary": (state.get("post") or {}).get("body", "")[:1500],
                         "error": None,
@@ -671,26 +853,15 @@ def process_director_turn(
         normalized_approved = normalize_text(last_user_text)
         if _is_copy_or_design_request(normalized_approved) or "post" in normalized_approved:
             try:
-                result = _start_copy_from_strategy(
+                result = _start_execution_from_strategy(
                     state=state,
                     sanitized=sanitized,
                     language=language,
                 )
                 base_response.update(result)
-                base_response["team_tasks"] = [
-                    build_team_task_payload(
-                        {
-                            "agent_name": "Agente Copywriter",
-                            "status": "completed",
-                            "summary": (state.get("post") or {}).get("body", "")[:1500],
-                            "error": None,
-                        },
-                        agent_page_url,
-                    )
-                ]
                 return base_response
             except Exception as exc:  # noqa: BLE001
-                base_response["reply"] = f"Não consegui gerar a copy: {exc!s}"
+                base_response["reply"] = f"Não consegui gerar os posts: {exc!s}"
                 return base_response
         base_response["reply"] = (
             "Estratégia aprovada. Clica em «Iniciar execução» para o primeiro post "
@@ -709,6 +880,50 @@ def process_director_turn(
         )
         base_response["workflow_state"] = state
         base_response["pending_actions"] = state.get("pending_actions") or []
+        return base_response
+
+    # --- Calendário / posts LinkedIn ---
+    if action == ACTION_SELECT_POST:
+        post_id = str(payload.get("post_id") or "").strip()
+        if post_id and _select_calendar_post(state, post_id):
+            entry = (state.get("linkedin_calendar") or [])[state.get("active_post_index", 0)]
+            label = entry.get("scheduled_label") or entry.get("scheduled_date") or "post"
+            base_response["reply"] = f"A rever o post de {label}. Edita, refaz ou aprova a copy."
+            base_response["orchestration_mode"] = STAGE_COPY_REVIEW
+            base_response["workflow_state"] = state
+            base_response["pending_actions"] = state["pending_actions"]
+            base_response["deliverables"] = _deliverables_from_state(state)
+            return base_response
+        base_response["reply"] = "Não encontrei esse post no calendário."
+        return base_response
+
+    if action == ACTION_REGENERATE_LINKEDIN_POST and state["stage"] == STAGE_COPY_REVIEW:
+        post = dict(state.get("post") or {})
+        instr = str(payload.get("edit_instructions") or "").strip() or None
+        try:
+            new_post = regenerate_director_linkedin_post(
+                state, post, edit_instructions=instr, language=language
+            )
+            state["post"] = editor_post_from_linkedin(new_post)
+            post_id = str(state["post"].get("id") or "")
+            if post_id:
+                _sync_calendar_entry(state, post_id, state["post"])
+            base_response["reply"] = "Refiz o post com base na estratégia. Revê o texto abaixo."
+        except Exception as exc:  # noqa: BLE001
+            base_response["reply"] = f"Não consegui refazer o post: {exc!s}"
+        base_response["orchestration_mode"] = STAGE_COPY_REVIEW
+        base_response["workflow_state"] = state
+        base_response["pending_actions"] = state.get("pending_actions") or []
+        base_response["deliverables"] = _deliverables_from_state(state)
+        return base_response
+
+    if state["stage"] == STAGE_POSTS_REVIEW and not user_action:
+        base_response["reply"] = (
+            "Escolhe o próximo post no calendário abaixo para rever copy e imagem."
+        )
+        base_response["orchestration_mode"] = STAGE_POSTS_REVIEW
+        base_response["workflow_state"] = state
+        base_response["pending_actions"] = [ACTION_SELECT_POST]
         return base_response
 
     # --- Acções explícitas do fluxo copy/imagem ---
@@ -736,7 +951,10 @@ def process_director_turn(
         if new_body:
             post["body"] = new_body
             state["post"] = post
-        state["pending_actions"] = [ACTION_APPROVE_COPY, ACTION_EDIT_COPY]
+            post_id = str(post.get("id") or "")
+            if post_id:
+                _sync_calendar_entry(state, post_id, post)
+        state["pending_actions"] = [ACTION_APPROVE_COPY, ACTION_EDIT_COPY, ACTION_REGENERATE_LINKEDIN_POST]
         base_response["reply"] = "Atualizei o texto do post. Revê abaixo e clica em «Aprovar copy» quando estiver pronto."
         base_response["workflow_state"] = state
         base_response["pending_actions"] = state["pending_actions"]
@@ -744,11 +962,18 @@ def process_director_turn(
         return base_response
 
     if action == ACTION_SKIP_IMAGE and state["stage"] == STAGE_IMAGE_CONFIRM:
-        state["stage"] = STAGE_COMPLETED
-        state["pending_actions"] = []
-        base_response["reply"] = "Perfeito — pacote concluído só com a copy aprovada."
-        base_response["orchestration_mode"] = STAGE_COMPLETED
+        if state.get("linkedin_calendar"):
+            msg = _advance_after_post_packaged(state)
+            base_response["reply"] = msg
+            base_response["orchestration_mode"] = state["stage"]
+        else:
+            state["stage"] = STAGE_COMPLETED
+            state["pending_actions"] = []
+            base_response["reply"] = "Perfeito — pacote concluído só com a copy aprovada."
+            base_response["orchestration_mode"] = STAGE_COMPLETED
         base_response["workflow_state"] = state
+        base_response["deliverables"] = _deliverables_from_state(state)
+        base_response["pending_actions"] = state.get("pending_actions") or []
         return base_response
 
     if action in {ACTION_GENERATE_IMAGE, ACTION_REGENERATE_IMAGE} and state["stage"] in {
@@ -791,16 +1016,25 @@ def process_director_turn(
         return base_response
 
     if action == ACTION_APPROVE_IMAGE and state["stage"] == STAGE_IMAGE_REVIEW:
-        state["stage"] = STAGE_COMPLETED
-        state["pending_actions"] = []
         post = state.get("post") or {}
         if post:
             post["status"] = "ready"
             state["post"] = post
-        base_response["reply"] = "Pacote concluído: copy e imagem aprovados. Podes reutilizar estes materiais na tua campanha."
-        base_response["orchestration_mode"] = STAGE_COMPLETED
+        if state.get("linkedin_calendar"):
+            msg = _advance_after_post_packaged(state)
+            base_response["reply"] = msg
+            base_response["orchestration_mode"] = state["stage"]
+        else:
+            state["stage"] = STAGE_COMPLETED
+            state["pending_actions"] = []
+            base_response["reply"] = (
+                "Pacote concluído: copy e imagem aprovados. "
+                "Podes reutilizar estes materiais na tua campanha."
+            )
+            base_response["orchestration_mode"] = STAGE_COMPLETED
         base_response["workflow_state"] = state
         base_response["deliverables"] = _deliverables_from_state(state)
+        base_response["pending_actions"] = state.get("pending_actions") or []
         base_response["ready_to_route"] = False
         return base_response
 
@@ -844,26 +1078,15 @@ def process_director_turn(
         normalized_last
     ):
         try:
-            result = _start_copy_from_strategy(
+            result = _start_execution_from_strategy(
                 state=state,
                 sanitized=sanitized,
                 language=language,
             )
             base_response.update(result)
-            base_response["team_tasks"] = [
-                build_team_task_payload(
-                    {
-                        "agent_name": "Agente Copywriter",
-                        "status": "completed",
-                        "summary": (state.get("post") or {}).get("body", "")[:1500],
-                        "error": None,
-                    },
-                    agent_page_url,
-                )
-            ]
             return base_response
         except Exception as exc:  # noqa: BLE001
-            base_response["reply"] = f"Não consegui gerar a copy: {exc!s}"
+            base_response["reply"] = f"Não consegui gerar os posts: {exc!s}"
             return base_response
 
     keyword_agents = infer_team_agents_from_keywords(

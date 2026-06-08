@@ -12,6 +12,18 @@ from openai import OpenAI
 
 METRIC_MISSING_DISPLAY_PT = "Sem dados públicos disponíveis."
 
+# Regras de extensão para posts LinkedIn orgânicos (Diretor + página de perfil).
+_LINKEDIN_POST_BODY_LENGTH_RULES = (
+    "EXTENSÃO OBRIGATÓRIA no campo «body» (texto publicável completo):\n"
+    "- Posts tipo texto/artigo/documento: MÍNIMO 280 palavras, ideal 350–550 palavras.\n"
+    "- Estrutura: gancho forte (1–2 frases); 3–5 parágrafos com valor (história, dados ou exemplo); "
+    "lista com 3–5 bullets quando fizer sentido; fecho com insight + CTA profissional.\n"
+    "- Usa quebras de linha duplas (\\n\\n) entre blocos. O «hook» pode repetir a abertura do body.\n"
+    "- NÃO entregues posts de 2–3 frases — são demasiado curtos para LinkedIn orgânico.\n"
+    "- Polls: pergunta clara + contexto (80–120 palavras) + 3–4 opções. "
+    "Vídeo: roteiro/gancho detalhado (200+ palavras)."
+)
+
 SUPPORTED_SOCIAL_PLATFORMS: Tuple[str, ...] = (
     "instagram",
     "linkedin",
@@ -770,6 +782,7 @@ class SocialMediaAgent:
         profile_url: Optional[str] = None,
         count: int = 3,
         language: str = "pt-PT",
+        strategy_brief: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Gera posts LinkedIn prontos a publicar com base na análise do perfil.
 
@@ -782,6 +795,7 @@ class SocialMediaAgent:
             profile_url: URL público do perfil analisado.
             count: Número de posts a gerar (1–7).
             language: Idioma dos posts (por defeito ``pt-PT``).
+            strategy_brief: Plano estratégico aprovado pelo Diretor (opcional).
 
         Retorno:
             Dicionário com chave ``posts`` (lista de objectos com ``id``, ``content_type``,
@@ -803,8 +817,9 @@ class SocialMediaAgent:
             "És um copywriter sénior especializado em LinkedIn B2B (português de Portugal). "
             f"Responde em {language}. "
             "Cria posts autênticos, específicos ao perfil analisado — sem clichés de Instagram. "
-            "Cada post deve ter gancho forte, valor prático e CTA profissional. "
-            "Varia os formatos entre: texto, artigo, documento, poll, video. "
+            "Cada post deve ter profundidade editorial: argumento desenvolvido, exemplos concretos "
+            "e CTA profissional. Varia os formatos entre: texto, artigo, documento, poll, video. "
+            f"{_LINKEDIN_POST_BODY_LENGTH_RULES} "
             "Responde APENAS com JSON válido:\n"
             '{"posts":[{"content_type":"texto|artigo|documento|poll|video",'
             '"title":"...",'
@@ -813,19 +828,28 @@ class SocialMediaAgent:
             '"cta":"...",'
             '"angle":"porque encaixa neste perfil"}]}'
         )
+        strategy_block = ""
+        if strategy_brief and str(strategy_brief).strip():
+            strategy_block = (
+                f"\n\nESTRATÉGIA APROVADA (obrigatório seguir pilares, ICP e cadência):\n"
+                f"{str(strategy_brief).strip()}\n"
+            )
         user_prompt = (
-            f"Cria exactamente {n} posts LinkedIn distintos.\n"
+            f"Cria exactamente {n} posts LinkedIn distintos para a semana.\n"
             f"Perfil / URL: {url_hint or 'n/d'}\n\n"
             f"Análise:\n{compact_analysis}\n\n"
-            f"Dados do perfil:\n{compact_profile}\n\n"
+            f"Dados do perfil:\n{compact_profile}"
+            f"{strategy_block}\n"
             "Usa insights, oportunidades e ideias_conteudo da análise. "
-            "Posts curtos-médios (150–350 palavras para texto; polls com pergunta + 3–4 opções)."
+            "Distribui os posts pelos pilares de conteúdo da estratégia. "
+            "Prioriza posts longos e úteis (mínimo 280 palavras no body para texto/artigo/documento)."
         )
 
         client = OpenAI(api_key=self._api_key)
         response = client.chat.completions.create(
             model=self._model,
             temperature=0.55,
+            max_tokens=min(16384, max(4096, 1800 * n)),
             response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -873,7 +897,8 @@ class SocialMediaAgent:
         system_prompt = (
             "És copywriter LinkedIn B2B. "
             f"Responde em {language}. "
-            "Reescreve UM post com base no contexto. "
+            "Reescreve UM post com base no contexto, com mais profundidade e detalhe. "
+            f"{_LINKEDIN_POST_BODY_LENGTH_RULES} "
             'Responde APENAS JSON: {"post":{"content_type":"...","title":"...","body":"...",'
             '"hook":"...","cta":"...","angle":"..."}}'
         )
@@ -882,13 +907,15 @@ class SocialMediaAgent:
             f"Instruções: {instr}\n\n"
             f"Post actual:\n{compact_post}\n\n"
             f"Análise:\n{compact_analysis}\n\n"
-            f"Dados perfil:\n{compact_profile}"
+            f"Dados perfil:\n{compact_profile}\n\n"
+            "Se o post actual for curto, expande-o até pelo menos 280 palavras no body."
         )
 
         client = OpenAI(api_key=self._api_key)
         response = client.chat.completions.create(
             model=self._model,
             temperature=0.6,
+            max_tokens=6144,
             response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": system_prompt},
