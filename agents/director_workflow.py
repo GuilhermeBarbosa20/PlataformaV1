@@ -15,6 +15,7 @@ from openai import OpenAI
 
 from agents.copywriter import copywriter_agent
 from agents.designer import designer_agent
+from agents.director_linkedin import profile_context_markdown
 from agents.director_strategy import (
     generate_linkedin_strategy,
     is_linkedin_strategy_intent,
@@ -41,6 +42,7 @@ STAGE_COMPLETED = "completed"
 
 ACTION_APPROVE_STRATEGY = "approve_strategy"
 ACTION_START_EXECUTION = "start_execution"
+ACTION_ANALYZE_LINKEDIN = "analyze_linkedin_profile"
 ACTION_APPROVE_COPY = "approve_copy"
 ACTION_EDIT_COPY = "edit_copy"
 ACTION_GENERATE_IMAGE = "generate_image"
@@ -97,6 +99,9 @@ def _new_workflow_state() -> Dict[str, Any]:
         "execution_plan": "",
         "channels": [],
         "strategy": None,
+        "linkedin_connected": False,
+        "linkedin_profile_url": "",
+        "linkedin_analysis": None,
         "post": None,
         "copy": None,
         "image": None,
@@ -127,6 +132,10 @@ def normalize_workflow_state(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     state["channels"] = raw.get("channels") if isinstance(raw.get("channels"), list) else []
     if isinstance(raw.get("strategy"), dict):
         state["strategy"] = raw["strategy"]
+    state["linkedin_connected"] = bool(raw.get("linkedin_connected"))
+    state["linkedin_profile_url"] = str(raw.get("linkedin_profile_url") or "").strip()
+    if isinstance(raw.get("linkedin_analysis"), dict):
+        state["linkedin_analysis"] = raw["linkedin_analysis"]
     if isinstance(raw.get("post"), dict):
         state["post"] = raw["post"]
     if isinstance(raw.get("copy"), dict):
@@ -284,18 +293,16 @@ def _build_redirect_response(
     agent_name: str,
     agent_page_url: Callable[[str], str],
 ) -> Dict[str, Any]:
-    """Monta resposta de encaminhamento para agente Instagram ou LinkedIn."""
+    """Monta resposta de encaminhamento para agente Instagram ou LinkedIn Ads."""
 
     labels = {
         INSTAGRAM_REDIRECT_AGENT: "Instagram / redes sociais",
-        "Agente LinkedIn (perfil)": "LinkedIn (perfil, posts e calendário)",
         "Agente Linkedin Ads": "LinkedIn Ads",
     }
     label = labels.get(agent_name, agent_name)
     return {
         "reply": (
             f"Para {label}, o trabalho operacional fica no agente especializado. "
-            "Aqui no Diretor trato só de **copy** e **imagem** (Designer). "
             "Clica no botão abaixo para continuar com o especialista certo."
         ),
         "orchestration_mode": "redirect",
@@ -305,8 +312,45 @@ def _build_redirect_response(
         "ready_to_route": True,
         "agent_name": agent_name,
         "workflow_state": _new_workflow_state(),
-        "deliverables": {"post": None, "copy": None, "image": None},
+        "deliverables": _deliverables_from_state(_new_workflow_state()),
         "pending_actions": [],
+    }
+
+
+def _build_linkedin_director_response(
+    state: Dict[str, Any],
+    last_user_text: str,
+) -> Dict[str, Any]:
+    """Mantém operações LinkedIn orgânicas no Diretor (sem mudar de página)."""
+
+    connected = bool(state.get("linkedin_connected"))
+    has_analysis = bool(state.get("linkedin_analysis"))
+    if not connected:
+        reply = (
+            "Para LinkedIn orgânico, fica aqui comigo. Primeiro **liga o LinkedIn** "
+            "no painel acima (botão «Ligar LinkedIn»). Depois diz-me os teus objetivos "
+            "— eu defino a estratégia para o que quiseres atingir."
+        )
+    elif not has_analysis:
+        reply = (
+            "Sessão LinkedIn activa. Clica em **«Analisar perfil»** no painel para eu "
+            "ter métricas reais. Em seguida descreve os teus objetivos e monto a estratégia."
+        )
+        state["pending_actions"] = [ACTION_ANALYZE_LINKEDIN]
+    else:
+        reply = (
+            "Perfil LinkedIn já analisado. Descreve os teus objetivos (o que quiseres "
+            "atingir e até quando) e eu defino a estratégia personalizada."
+        )
+        state["pending_actions"] = []
+    return {
+        "reply": reply,
+        "orchestration_mode": state.get("stage") or STAGE_IDLE,
+        "workflow_state": state,
+        "deliverables": _deliverables_from_state(state),
+        "pending_actions": state.get("pending_actions") or [],
+        "agents_involved": [],
+        "ready_to_route": False,
     }
 
 
@@ -344,6 +388,9 @@ def _deliverables_from_state(state: Dict[str, Any]) -> Dict[str, Any]:
 
     return {
         "strategy": state.get("strategy"),
+        "linkedin_analysis": state.get("linkedin_analysis"),
+        "linkedin_connected": state.get("linkedin_connected"),
+        "linkedin_profile_url": state.get("linkedin_profile_url"),
         "post": state.get("post"),
         "copy": state.get("copy"),
         "image": state.get("image"),
@@ -382,12 +429,14 @@ def _generate_and_review_strategy(
         Payload parcial com ``reply``, ``workflow_state`` e ``deliverables``.
     """
 
+    profile_ctx = profile_context_markdown(state.get("linkedin_analysis"))
     result = generate_linkedin_strategy(
         client,
         model,
         messages,
         language,
         previous_strategy=previous_strategy,
+        profile_context=profile_ctx or None,
     )
     strategy = result.get("strategy") or {}
     needs_clarification = bool(result.get("needs_clarification"))
@@ -771,7 +820,8 @@ def process_director_turn(
     normalized_last = normalize_text(last_user_text) if last_user_text else ""
     conversation_full = build_conversation_brief(sanitized)
     strategy_intent = is_linkedin_strategy_intent(
-        f"{conversation_full}\n{last_user_text}"
+        f"{conversation_full}\n{last_user_text}",
+        workflow_channels=state.get("channels"),
     )
 
     if strategy_intent or (
@@ -831,6 +881,8 @@ def process_director_turn(
             resolve_linkedin,
             correct_linkedin_agent,
         )
+    if redirect_agent in LINKEDIN_REDIRECT_AGENTS:
+        return _build_linkedin_director_response(state, last_user_text)
     if redirect_agent:
         return _build_redirect_response(redirect_agent, agent_page_url)
 

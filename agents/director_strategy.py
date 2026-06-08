@@ -48,6 +48,41 @@ LINKEDIN_MARKERS = (
     "linked in",
 )
 
+LINKEDIN_GOAL_VERBS = (
+    "quero",
+    "preciso",
+    "pretendo",
+    "gostava",
+    "objetivo",
+    "objetivos",
+    "meta",
+    "metas",
+    "aumentar",
+    "crescer",
+    "melhorar",
+    "atingir",
+    "chegar",
+    "conseguir",
+    "gerar",
+    "construir",
+    "posicionar",
+    "autoridade",
+    "visibilidade",
+    "leads",
+    "vendas",
+    "notoriedade",
+    "marca",
+    "engagement",
+    "alcance",
+    "impressoes",
+    "impressões",
+    "reputacao",
+    "reputação",
+    "networking",
+    "comentarios",
+    "comentários",
+)
+
 
 def _normalize_for_match(text: str) -> str:
     """Compacta texto para comparação insensível a acentos básicos."""
@@ -72,44 +107,48 @@ def _normalize_for_match(text: str) -> str:
     return lowered
 
 
-def is_linkedin_strategy_intent(text: str) -> bool:
-    """Indica se o utilizador está a pedir definição de estratégia LinkedIn.
+def is_linkedin_strategy_intent(
+    text: str,
+    *,
+    workflow_channels: Optional[List[str]] = None,
+) -> bool:
+    """Indica se o utilizador pede estratégia LinkedIn com objetivos próprios.
 
-    Deteta combinações de menção a LinkedIn com objetivos, métricas ou
-    planeamento estratégico (seguidores, SSI, ranking, ICP, pilares, etc.).
+    O utilizador pode definir qualquer meta (seguidores, SSI, leads, marca,
+    autoridade, ranking, etc.). Esta função só deteta a *intenção* de planear
+    no LinkedIn — o conteúdo concreto dos objetivos é tratado pelo LLM.
 
     Argumentos:
         text: Última mensagem do utilizador (ou brief agregado).
+        workflow_channels: Canais já activos no fluxo (ex.: ``linkedin``).
 
     Retorno:
-        ``True`` quando o pedido deve entrar no fluxo de estratégia do Diretor
-        em vez de redireccionar para o agente LinkedIn operacional.
+        ``True`` quando o pedido deve entrar no fluxo de estratégia do Diretor.
     """
 
     normalized = _normalize_for_match(text.strip())
     if not normalized:
         return False
 
+    channels = [str(c).strip().lower() for c in (workflow_channels or [])]
+    in_linkedin_flow = "linkedin" in channels
+
     has_linkedin = any(marker in normalized for marker in LINKEDIN_MARKERS)
     has_strategy = any(marker in normalized for marker in STRATEGY_MARKERS)
+    has_goal = any(marker in normalized for marker in LINKEDIN_GOAL_VERBS)
 
-    # Padrões típicos sem dizer "LinkedIn" explicitamente
-    has_follower_goal = bool(
-        re.search(r"\b\d{3,6}\b", normalized)
-        and ("seguidor" in normalized or "follower" in normalized)
-    )
-    has_smart_deadline = bool(
-        re.search(r"\b(ate|até|final de|ate ao)\s+\w+", normalized)
-        and has_strategy
+    has_numeric_target = bool(re.search(r"\b\d{2,6}\b", normalized))
+    has_deadline = bool(
+        re.search(r"\b(ate|até|final de|ate ao|prazo|deadline)\b", normalized)
     )
 
-    if has_linkedin and (has_strategy or has_follower_goal):
+    if has_linkedin and (has_strategy or has_goal or has_numeric_target):
         return True
-    if has_follower_goal and has_smart_deadline:
+    if in_linkedin_flow and (has_goal or has_strategy or has_numeric_target):
         return True
-    if "ssi" in normalized and (has_linkedin or has_strategy):
+    if has_linkedin and has_deadline:
         return True
-    if "ranking" in normalized and "top" in normalized:
+    if has_numeric_target and has_deadline and (has_goal or has_strategy):
         return True
     return False
 
@@ -408,6 +447,7 @@ def generate_linkedin_strategy(
     language: str,
     *,
     previous_strategy: Optional[Dict[str, Any]] = None,
+    profile_context: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Gera plano estratégico LinkedIn orgânico com base na conversa.
 
@@ -420,6 +460,7 @@ def generate_linkedin_strategy(
         messages: Histórico da chatroom do Diretor.
         language: Idioma da resposta (ex.: ``pt-PT``).
         previous_strategy: Estratégia anterior para refinamento iterativo.
+        profile_context: Resumo markdown da análise do perfil LinkedIn (opcional).
 
     Retorno:
         Dicionário com chaves ``strategy`` (normalizada), ``reply`` (mensagem ao
@@ -434,11 +475,19 @@ def generate_linkedin_strategy(
             + json.dumps(previous_strategy, ensure_ascii=False)
         )
 
+    profile_block = ""
+    if profile_context:
+        profile_block = f"\n\nDados do perfil analisado:\n{profile_context}"
+
     system_prompt = (
         f"És o Diretor de Marketing AI — marketeer sénior especializado em LinkedIn orgânico. "
         f"Responde ao utilizador em {language}. "
-        "O utilizador define objetivos; tu defines a ESTRATÉGIA completa antes de qualquer post. "
-        "Inclui sempre: ICP (para quem comunicamos), objetivos SMART com valores e prazos, "
+        "O utilizador define os SEUS objetivos (podem ser seguidores, SSI, ranking, leads, "
+        "autoridade, marca, engagement, vendas, ou qualquer combinação). "
+        "Tu inventas a ESTRATÉGIA completa para atingir exactamente o que ele pediu — "
+        "não assumes metas genéricas nem copies exemplos anteriores. "
+        "Inclui sempre: ICP (para quem comunicamos), objetivos SMART com valores e prazos "
+        "extraídos do pedido do utilizador, "
         "pilares de conteúdo com percentagem semanal (soma dos pilares = 100), "
         "cadência de publicação, mix de formatos (%), cenários (conservador/realista/agressivo), "
         "KPIs semanais intermédios e táticas orgânicas. "
@@ -473,7 +522,7 @@ def generate_linkedin_strategy(
             {"role": "system", "content": system_prompt},
             {
                 "role": "user",
-                "content": f"Histórico da conversa:\n{conversation}{prev_block}",
+                "content": f"Histórico da conversa:\n{conversation}{prev_block}{profile_block}",
             },
         ],
     )

@@ -1789,7 +1789,8 @@ def home() -> str:
     A função devolve uma página HTML com identidade visual profissional,
     avatar do Diretor servido em `/static/diretor-avatar.png`, campo de texto
     e botão “Enviar”, permitindo ao utilizador interagir com o colaborador
-    virtual sem precisar de ferramentas externas.
+    virtual sem precisar de ferramentas externas. Inclui login LinkedIn
+    (Supabase OIDC) e análise de perfil no próprio painel do Diretor.
 
     Argumentos:
         Nenhum.
@@ -1798,7 +1799,8 @@ def home() -> str:
         String HTML completa da interface de chat.
     """
 
-    return """
+    sup_url, sup_anon = get_supabase_public_credentials()
+    html = """
     <!doctype html>
     <html lang="pt">
       <head>
@@ -2049,6 +2051,49 @@ def home() -> str:
             border-radius: 999px;
           }
           .pillar-pct { min-width: 38px; text-align: right; color: #94a3b8; font-size: 0.8rem; }
+          .linkedin-auth-bar {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            margin: 12px 0 4px;
+            padding: 12px 14px;
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            background: rgba(15, 23, 42, 0.55);
+          }
+          .linkedin-auth-status { display: flex; align-items: center; gap: 8px; font-size: 0.86rem; color: #cbd5e1; }
+          .auth-dot {
+            width: 9px;
+            height: 9px;
+            border-radius: 50%;
+            background: #64748b;
+          }
+          .auth-dot.connected { background: #10b981; box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.25); }
+          .linkedin-auth-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+          .li-btn {
+            border: none;
+            border-radius: 8px;
+            padding: 8px 12px;
+            font-weight: 600;
+            font-size: 0.8rem;
+            cursor: pointer;
+            color: #fff;
+          }
+          .li-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+          .li-btn-login { background: linear-gradient(180deg, #0a66c2, #004182); }
+          .li-btn-analyze { background: linear-gradient(180deg, #10b981, #059669); }
+          .li-btn-logout { background: linear-gradient(180deg, #64748b, #475569); }
+          .linkedin-profile-hint { margin: 0 0 8px; font-size: 0.8rem; color: #94a3b8; min-height: 1.2em; }
+          .profile-panel {
+            margin-top: 12px;
+            padding: 12px 14px;
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            background: rgba(16, 185, 129, 0.08);
+          }
+          .profile-panel h5 { margin: 0 0 6px; color: #6ee7b7; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.04em; }
           .stage-hint {
             margin: 0 0 12px;
             color: #94a3b8;
@@ -2074,9 +2119,22 @@ def home() -> str:
               </div>
               <div>
                 <h1 class="title">Diretor de Marketing · Chatroom</h1>
-                <p class="subtitle">Estratégia LinkedIn → aprovas → copy → imagem → aprovas. Falas só comigo; a equipa executa internamente.</p>
+                <p class="subtitle">Define os teus objetivos — eu monto a estratégia LinkedIn. Falas só comigo; a equipa executa internamente.</p>
               </div>
             </div>
+
+            <div id="linkedinAuthBar" class="linkedin-auth-bar">
+              <div class="linkedin-auth-status">
+                <span id="linkedinAuthDot" class="auth-dot"></span>
+                <span id="linkedinAuthLabel">LinkedIn: não ligado</span>
+              </div>
+              <div class="linkedin-auth-actions">
+                <button type="button" class="li-btn li-btn-login" id="btnDirectorLinkedinLogin" onclick="startDirectorLinkedinLogin()">Ligar LinkedIn</button>
+                <button type="button" class="li-btn li-btn-analyze" id="btnDirectorAnalyze" onclick="runDirectorLinkedinAnalysis()" disabled>Analisar perfil</button>
+                <button type="button" class="li-btn li-btn-logout" id="btnDirectorLinkedinLogout" onclick="endDirectorLinkedinSession()" style="display:none">Terminar sessão</button>
+              </div>
+            </div>
+            <p id="linkedinProfileHint" class="linkedin-profile-hint"></p>
 
             <div id="chatLog" class="chat-log"></div>
             <div class="controls">
@@ -2087,18 +2145,24 @@ def home() -> str:
               <button type="button" class="send-btn" onclick="sendMessage()">Enviar</button>
               <button type="button" class="reset-btn" onclick="resetChat()">Limpar conversa</button>
             </div>
-            <p class="hint">Define objetivos SMART e estratégia LinkedIn aqui. Operações técnicas (OAuth, publicar) continuam no agente LinkedIn.</p>
+            <p class="hint">Liga o LinkedIn acima para métricas reais. Descreve qualquer objetivo (seguidores, leads, marca, SSI…) — eu invento a estratégia.</p>
             <div id="result" class="result"></div>
           </section>
           <footer>PlataformaV1 · Diretor de Marketing AI</footer>
         </div>
         <script>
+          const SUPABASE_PUBLIC_URL = ___SUPABASE_URL_JSON___;
+          const SUPABASE_ANON_KEY = ___SUPABASE_ANON_JSON___;
+          const DIRECTOR_LINKEDIN_PROFILE_KEY = "plataforma_director_linkedin_profile_url";
+
           const chatLog = document.getElementById("chatLog");
           const chatInput = document.getElementById("chatInput");
           const languageInput = document.getElementById("languageInput");
           const result = document.getElementById("result");
           const messages = [];
           let workflowState = null;
+          let directorSupabaseClient = null;
+          let directorLinkedinSession = null;
           const WORKFLOW_STORAGE_KEY = "plataforma_director_workflow";
 
           function loadWorkflowState() {
@@ -2209,7 +2273,188 @@ def home() -> str:
             }
           }
 
+          async function getDirectorSupabaseClient() {
+            if (!SUPABASE_PUBLIC_URL || !SUPABASE_ANON_KEY) return null;
+            if (directorSupabaseClient) return directorSupabaseClient;
+            const { createClient } = await import("https://esm.sh/@supabase/supabase-js@2");
+            directorSupabaseClient = createClient(SUPABASE_PUBLIC_URL, SUPABASE_ANON_KEY, {
+              auth: { detectSessionInUrl: true, persistSession: true, autoRefreshToken: true },
+            });
+            return directorSupabaseClient;
+          }
+
+          async function initDirectorSupabaseFromUrl() {
+            const sb = await getDirectorSupabaseClient();
+            if (!sb) return null;
+            const params = new URLSearchParams(window.location.search || "");
+            const code = params.get("code");
+            try {
+              if (code) await sb.auth.exchangeCodeForSession(code);
+              else if (window.location.hash && window.location.hash.includes("access_token")) {
+                await sb.auth.getSession();
+              }
+            } catch (e) {
+              console.warn("Director Supabase init:", e);
+            }
+            if (code || (window.location.hash && window.location.hash.includes("access_token"))) {
+              window.history.replaceState({}, "", window.location.pathname);
+            }
+            return sb;
+          }
+
+          async function refreshDirectorLinkedinAuth() {
+            const dot = document.getElementById("linkedinAuthDot");
+            const label = document.getElementById("linkedinAuthLabel");
+            const loginBtn = document.getElementById("btnDirectorLinkedinLogin");
+            const analyzeBtn = document.getElementById("btnDirectorAnalyze");
+            const logoutBtn = document.getElementById("btnDirectorLinkedinLogout");
+            const hint = document.getElementById("linkedinProfileHint");
+            const sb = await getDirectorSupabaseClient();
+            if (!sb) {
+              if (label) label.textContent = "LinkedIn: Supabase não configurado no servidor";
+              return;
+            }
+            const { data } = await sb.auth.getSession();
+            directorLinkedinSession = data.session || null;
+            const connected = Boolean(directorLinkedinSession && directorLinkedinSession.access_token);
+            if (!workflowState) workflowState = {};
+            workflowState.linkedin_connected = connected;
+            if (dot) dot.classList.toggle("connected", connected);
+            if (label) label.textContent = connected ? "LinkedIn: ligado" : "LinkedIn: não ligado";
+            if (loginBtn) loginBtn.style.display = connected ? "none" : "";
+            if (logoutBtn) logoutBtn.style.display = connected ? "" : "none";
+            if (analyzeBtn) analyzeBtn.disabled = !connected;
+            if (connected) {
+              const stored = localStorage.getItem(DIRECTOR_LINKEDIN_PROFILE_KEY) || "";
+              if (stored) workflowState.linkedin_profile_url = stored;
+              if (hint) hint.textContent = stored ? `Perfil guardado: ${stored}` : "Ligado — clica em «Analisar perfil» para métricas reais.";
+            } else if (hint) {
+              hint.textContent = "";
+            }
+            saveWorkflowState();
+          }
+
+          async function startDirectorLinkedinLogin() {
+            const sb = await getDirectorSupabaseClient();
+            if (!sb) {
+              alert("Supabase não configurado no servidor (.env).");
+              return;
+            }
+            const redirectTo = window.location.origin + window.location.pathname;
+            const { error } = await sb.auth.signInWithOAuth({
+              provider: "linkedin_oidc",
+              options: { redirectTo },
+            });
+            if (error) alert("Erro no login LinkedIn: " + error.message);
+          }
+
+          async function endDirectorLinkedinSession() {
+            const sb = await getDirectorSupabaseClient();
+            if (sb) await sb.auth.signOut();
+            directorLinkedinSession = null;
+            if (workflowState) {
+              workflowState.linkedin_connected = false;
+              workflowState.linkedin_analysis = null;
+            }
+            await refreshDirectorLinkedinAuth();
+            saveWorkflowState();
+            renderDirectorPanel({
+              orchestration_mode: (workflowState && workflowState.stage) || "idle",
+              deliverables: { strategy: workflowState && workflowState.strategy, linkedin_analysis: null },
+              workflow_state: workflowState,
+            });
+          }
+
+          function appendDirectorLinkedinSessionFields(payload) {
+            if (!payload || !directorLinkedinSession) return payload;
+            payload.supabase_access_token = directorLinkedinSession.access_token;
+            if (directorLinkedinSession.provider_token) {
+              payload.linkedin_provider_token = directorLinkedinSession.provider_token;
+            }
+            const idTok = directorLinkedinSession.provider_id_token
+              || (directorLinkedinSession.user && directorLinkedinSession.user.id_token);
+            if (idTok) payload.linkedin_id_token = idTok;
+            const stored = localStorage.getItem(DIRECTOR_LINKEDIN_PROFILE_KEY) || "";
+            if (stored) payload.stored_linkedin_profile_url = stored;
+            return payload;
+          }
+
+          async function runDirectorLinkedinAnalysis() {
+            if (!directorLinkedinSession) {
+              alert("Liga o LinkedIn primeiro.");
+              return;
+            }
+            const hint = document.getElementById("linkedinProfileHint");
+            if (hint) hint.textContent = "A analisar perfil LinkedIn (Apify + IA)…";
+            const payload = appendDirectorLinkedinSessionFields({
+              profile_input: "",
+              messages: [],
+              language: languageInput.value.trim() || "pt-PT",
+              platform: "linkedin",
+              link_as_own_profile: true,
+            });
+            try {
+              const response = await fetch("/agents/social-media/profile-analyze", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+              });
+              const data = await response.json();
+              if (!response.ok) {
+                const detail = data.detail || JSON.stringify(data);
+                if (hint) hint.textContent = "";
+                addMessage("assistant", "Não consegui analisar o perfil. " + detail);
+                return;
+              }
+              if (!workflowState) workflowState = {};
+              workflowState.linkedin_connected = true;
+              workflowState.linkedin_profile_url = data.profile_url || "";
+              if (data.profile_url) {
+                localStorage.setItem(DIRECTOR_LINKEDIN_PROFILE_KEY, data.profile_url);
+              }
+              const slim = {
+                profile_url: data.profile_url,
+                linkedin_own_profile: data.linkedin_own_profile,
+                metricas_linkedin: data.metricas_linkedin || data.metricas_instagram || {},
+                metricas_universais: data.metricas_universais || {},
+                principais_insights: (data.principais_insights || []).slice(0, 6),
+                problemas_identificados: (data.problemas_identificados || []).slice(0, 5),
+                oportunidades: (data.oportunidades || []).slice(0, 5),
+                acoes_prioritarias: (data.acoes_prioritarias || []).slice(0, 5),
+              };
+              workflowState.linkedin_analysis = slim;
+              workflowState.channels = ["linkedin"];
+              saveWorkflowState();
+              if (hint) hint.textContent = data.profile_url
+                ? `Perfil analisado: ${data.profile_url}`
+                : "Perfil analisado.";
+              addMessage("assistant", "Perfil LinkedIn analisado. Agora diz-me os teus objetivos — eu monto a estratégia para atingires o que definires.");
+              renderDirectorPanel({
+                orchestration_mode: workflowState.stage || "idle",
+                execution_plan: workflowState.execution_plan || "",
+                deliverables: {
+                  strategy: workflowState.strategy,
+                  linkedin_analysis: slim,
+                  linkedin_connected: true,
+                  linkedin_profile_url: workflowState.linkedin_profile_url,
+                },
+                workflow_state: workflowState,
+              });
+            } catch (err) {
+              if (hint) hint.textContent = "";
+              addMessage("assistant", "Falha na análise do perfil. Tenta novamente.");
+            }
+          }
+
+          window.startDirectorLinkedinLogin = startDirectorLinkedinLogin;
+          window.endDirectorLinkedinSession = endDirectorLinkedinSession;
+          window.runDirectorLinkedinAnalysis = runDirectorLinkedinAnalysis;
+
           function buildPayload(extra = {}) {
+            if (!workflowState) workflowState = {};
+            workflowState.linkedin_connected = Boolean(
+              directorLinkedinSession && directorLinkedinSession.access_token
+            );
             return {
               messages,
               language: languageInput.value.trim() || "pt-PT",
@@ -2314,6 +2559,22 @@ def home() -> str:
               </div>`;
           }
 
+          function renderProfilePanel(snapshot) {
+            if (!snapshot || !snapshot.profile_url) return "";
+            const metrics = snapshot.metricas_linkedin || {};
+            const metricLines = Object.entries(metrics).slice(0, 6)
+              .map(([k, v]) => `<li>${escapeHtml(k)}: ${escapeHtml(String(v))}</li>`).join("");
+            const insights = (snapshot.principais_insights || []).slice(0, 3)
+              .map((i) => `<li>${escapeHtml(i)}</li>`).join("");
+            return `
+              <div class="profile-panel">
+                <h5>Perfil LinkedIn analisado</h5>
+                <p class="post-meta">${escapeHtml(snapshot.profile_url)}</p>
+                ${metricLines ? `<ul class="strategy-list">${metricLines}</ul>` : ""}
+                ${insights ? `<ul class="strategy-list">${insights}</ul>` : ""}
+              </div>`;
+          }
+
           function renderDirectorPanel(data) {
             const mode = data.orchestration_mode || "planning";
             const plan = data.execution_plan
@@ -2321,6 +2582,8 @@ def home() -> str:
               : "";
             const deliverables = data.deliverables || {};
             const strategy = deliverables.strategy || (workflowState && workflowState.strategy) || null;
+            const linkedinAnalysis = deliverables.linkedin_analysis
+              || (workflowState && workflowState.linkedin_analysis) || null;
             const post = deliverables.post || (workflowState && workflowState.post) || null;
             const image = deliverables.image || (workflowState && workflowState.image) || null;
             const stageLabel = {
@@ -2348,7 +2611,7 @@ def home() -> str:
               idle: "Começa por definir a tua estratégia LinkedIn ou pede copy/imagem."
             }[mode] || "";
 
-            let workflowHtml = renderStrategyPanel(strategy, mode);
+            let workflowHtml = renderProfilePanel(linkedinAnalysis) + renderStrategyPanel(strategy, mode);
             if (post && post.body) {
               const readonly = mode !== "copy_review";
               const metaParts = [];
@@ -2449,19 +2712,28 @@ def home() -> str:
             saveWorkflowState();
             chatLog.innerHTML = "";
             result.innerHTML = "<p>Conversa reiniciada.</p>";
-            addMessage("assistant", "Olá! Sou o teu Diretor de Marketing. Diz-me os teus objetivos LinkedIn (seguidores, SSI, ranking, ICP) e eu defino a estratégia antes de produzir posts.");
+            addMessage("assistant", "Olá! Sou o teu Diretor de Marketing. Liga o LinkedIn acima se quiseres métricas reais. Depois diz-me o que queres atingir — eu defino a estratégia.");
           }
 
           loadWorkflowState();
-          addMessage("assistant", "Olá! Sou o teu Diretor de Marketing. Diz-me os teus objetivos LinkedIn (seguidores, SSI, ranking, ICP) e eu defino a estratégia antes de produzir posts.");
-          if (workflowState && workflowState.strategy) {
-            renderDirectorPanel({
-              orchestration_mode: workflowState.stage || "strategy_review",
-              execution_plan: workflowState.execution_plan || "",
-              deliverables: { strategy: workflowState.strategy, post: workflowState.post, image: workflowState.image },
-              workflow_state: workflowState
-            });
-          }
+          addMessage("assistant", "Olá! Sou o teu Diretor de Marketing. Liga o LinkedIn acima se quiseres métricas reais. Depois diz-me o que queres atingir — eu defino a estratégia.");
+          (async function bootstrapDirectorPage() {
+            await initDirectorSupabaseFromUrl();
+            await refreshDirectorLinkedinAuth();
+            if (workflowState && (workflowState.strategy || workflowState.linkedin_analysis)) {
+              renderDirectorPanel({
+                orchestration_mode: workflowState.stage || "idle",
+                execution_plan: workflowState.execution_plan || "",
+                deliverables: {
+                  strategy: workflowState.strategy,
+                  linkedin_analysis: workflowState.linkedin_analysis,
+                  post: workflowState.post,
+                  image: workflowState.image,
+                },
+                workflow_state: workflowState,
+              });
+            }
+          })();
           chatInput.addEventListener("keydown", (event) => {
             if (event.key === "Enter" && !event.shiftKey) {
               event.preventDefault();
@@ -2472,6 +2744,10 @@ def home() -> str:
       </body>
     </html>
     """
+    return (
+        html.replace("___SUPABASE_URL_JSON___", json.dumps(sup_url))
+        .replace("___SUPABASE_ANON_JSON___", json.dumps(sup_anon))
+    )
 
 
 @app.post("/chat")
