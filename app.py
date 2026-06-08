@@ -2008,8 +2008,47 @@ def home() -> str:
             color: #fff;
           }
           .wf-btn-approve { background: linear-gradient(180deg, #10b981, #059669); }
+          .wf-btn-strategy { background: linear-gradient(180deg, #0ea5e9, #0369a1); }
           .wf-btn-image { background: linear-gradient(180deg, #8b5cf6, #6d28d9); }
           .wf-btn-secondary { background: linear-gradient(180deg, #64748b, #475569); }
+          .strategy-panel {
+            margin-top: 12px;
+            padding: 14px;
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            background: rgba(15, 23, 42, 0.6);
+          }
+          .strategy-panel h4 { margin: 0 0 10px; color: #e2e8f0; font-size: 0.95rem; }
+          .strategy-section { margin-bottom: 14px; }
+          .strategy-section h5 {
+            margin: 0 0 6px;
+            color: #93c5fd;
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+          }
+          .strategy-list { margin: 0; padding-left: 18px; color: #cbd5e1; font-size: 0.86rem; line-height: 1.45; }
+          .pillar-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 8px;
+            font-size: 0.84rem;
+            color: #e2e8f0;
+          }
+          .pillar-bar-wrap {
+            flex: 1;
+            height: 8px;
+            background: #1e293b;
+            border-radius: 999px;
+            overflow: hidden;
+          }
+          .pillar-bar {
+            height: 100%;
+            background: linear-gradient(90deg, #0ea5e9, #6366f1);
+            border-radius: 999px;
+          }
+          .pillar-pct { min-width: 38px; text-align: right; color: #94a3b8; font-size: 0.8rem; }
           .stage-hint {
             margin: 0 0 12px;
             color: #94a3b8;
@@ -2035,7 +2074,7 @@ def home() -> str:
               </div>
               <div>
                 <h1 class="title">Diretor de Marketing · Chatroom</h1>
-                <p class="subtitle">Aqui: copy → aprovas → imagem → aprovas. Instagram e LinkedIn (perfil, posts, calendário) abrem no agente de redes / LinkedIn.</p>
+                <p class="subtitle">Estratégia LinkedIn → aprovas → copy → imagem → aprovas. Falas só comigo; a equipa executa internamente.</p>
               </div>
             </div>
 
@@ -2048,7 +2087,7 @@ def home() -> str:
               <button type="button" class="send-btn" onclick="sendMessage()">Enviar</button>
               <button type="button" class="reset-btn" onclick="resetChat()">Limpar conversa</button>
             </div>
-            <p class="hint">Copy + imagem aqui. Para Instagram ou gestão LinkedIn, o Diretor encaminha para o agente certo.</p>
+            <p class="hint">Define objetivos SMART e estratégia LinkedIn aqui. Operações técnicas (OAuth, publicar) continuam no agente LinkedIn.</p>
             <div id="result" class="result"></div>
           </section>
           <footer>PlataformaV1 · Diretor de Marketing AI</footer>
@@ -2060,6 +2099,25 @@ def home() -> str:
           const result = document.getElementById("result");
           const messages = [];
           let workflowState = null;
+          const WORKFLOW_STORAGE_KEY = "plataforma_director_workflow";
+
+          function loadWorkflowState() {
+            try {
+              const raw = localStorage.getItem(WORKFLOW_STORAGE_KEY);
+              if (!raw) return;
+              workflowState = JSON.parse(raw);
+            } catch (e) {}
+          }
+
+          function saveWorkflowState() {
+            try {
+              if (workflowState) {
+                localStorage.setItem(WORKFLOW_STORAGE_KEY, JSON.stringify(workflowState));
+              } else {
+                localStorage.removeItem(WORKFLOW_STORAGE_KEY);
+              }
+            } catch (e) {}
+          }
 
           function addMessage(role, content) {
             messages.push({ role, content });
@@ -2101,6 +2159,7 @@ def home() -> str:
           function applyDirectorResponse(data) {
             if (data.workflow_state) {
               workflowState = data.workflow_state;
+              saveWorkflowState();
             }
             addMessage("assistant", data.reply || "Percebi.");
             renderDirectorPanel(data);
@@ -2151,15 +2210,84 @@ def home() -> str:
             }));
           }
 
+          function renderStrategyPanel(strategy, mode) {
+            if (!strategy) return "";
+            const hasContent = strategy.summary
+              || (strategy.smart_objectives && strategy.smart_objectives.length)
+              || (strategy.content_pillars && strategy.content_pillars.length);
+            if (!hasContent) return "";
+            const icp = strategy.icp || {};
+            const objectives = strategy.smart_objectives || [];
+            const pillars = strategy.content_pillars || [];
+            const cadence = strategy.cadence || {};
+            const scenarios = strategy.scenarios || [];
+
+            const objHtml = objectives.length
+              ? `<ul class="strategy-list">${objectives.map((o) =>
+                  `<li><strong>${escapeHtml(o.metric || "")}</strong>: ${escapeHtml(String(o.current_value ?? "—"))} → ${escapeHtml(String(o.target_value ?? "—"))} até ${escapeHtml(o.deadline || "—")}</li>`
+                ).join("")}</ul>`
+              : "";
+
+            const pillarHtml = pillars.length
+              ? pillars.map((p) => {
+                  const pct = Number(p.weekly_percentage) || 0;
+                  return `<div class="pillar-row">
+                    <span>${escapeHtml(p.theme || "")}</span>
+                    <div class="pillar-bar-wrap"><div class="pillar-bar" style="width:${pct}%"></div></div>
+                    <span class="pillar-pct">${pct}%</span>
+                  </div>`;
+                }).join("")
+              : "";
+
+            const scenarioHtml = scenarios.length
+              ? `<ul class="strategy-list">${scenarios.map((s) =>
+                  `<li><strong>${escapeHtml(s.name || "")}</strong>: ${escapeHtml(s.description || "")}</li>`
+                ).join("")}</ul>`
+              : "";
+
+            let actionsHtml = "";
+            if (mode === "strategy_review") {
+              actionsHtml = `
+                <div class="workflow-actions">
+                  <button type="button" class="wf-btn wf-btn-approve" onclick="approveStrategy()">Aprovar estratégia</button>
+                  <button type="button" class="wf-btn wf-btn-strategy" onclick="startExecution()">Iniciar execução</button>
+                </div>`;
+            } else if (mode === "strategy_approved") {
+              actionsHtml = `
+                <div class="workflow-actions">
+                  <button type="button" class="wf-btn wf-btn-strategy" onclick="startExecution()">Iniciar execução</button>
+                </div>`;
+            }
+
+            return `
+              <div class="strategy-panel">
+                <h4>Estratégia LinkedIn</h4>
+                ${strategy.summary ? `<p class="post-meta">${escapeHtml(strategy.summary)}</p>` : ""}
+                <div class="strategy-section">
+                  <h5>ICP — público-alvo</h5>
+                  <p class="post-meta">${escapeHtml(icp.persona_label || "")}${icp.description ? " — " + escapeHtml(icp.description) : ""}</p>
+                </div>
+                ${objectives.length ? `<div class="strategy-section"><h5>Objetivos SMART</h5>${objHtml}</div>` : ""}
+                ${pillars.length ? `<div class="strategy-section"><h5>Pilares de conteúdo (% semanal)</h5>${pillarHtml}</div>` : ""}
+                ${cadence.posts_per_week ? `<div class="strategy-section"><h5>Cadência</h5><p class="post-meta">${cadence.posts_per_week} posts/semana</p></div>` : ""}
+                ${scenarios.length ? `<div class="strategy-section"><h5>Cenários</h5>${scenarioHtml}</div>` : ""}
+                ${actionsHtml}
+              </div>`;
+          }
+
           function renderDirectorPanel(data) {
             const mode = data.orchestration_mode || "planning";
             const plan = data.execution_plan
               ? `<p class="plan-line"><strong>Plano:</strong> ${escapeHtml(data.execution_plan)}</p>`
               : "";
             const deliverables = data.deliverables || {};
+            const strategy = deliverables.strategy || (workflowState && workflowState.strategy) || null;
             const post = deliverables.post || (workflowState && workflowState.post) || null;
             const image = deliverables.image || (workflowState && workflowState.image) || null;
             const stageLabel = {
+              strategy_brief: "Brief estratégico",
+              strategy_review: "Revisão de estratégia",
+              strategy_approved: "Estratégia aprovada",
               planning: "Planeamento",
               copy_review: "Revisão de copy",
               image_confirm: "Confirmar imagem",
@@ -2169,16 +2297,19 @@ def home() -> str:
               idle: "Início"
             }[mode] || mode;
             const stageHint = {
+              strategy_brief: "Indica objetivos SMART, ICP e métricas actuais (ex.: seguidores, SSI, ranking).",
+              strategy_review: "Revê ICP, objetivos e pilares. Aprova a estratégia antes dos posts.",
+              strategy_approved: "Estratégia fechada. Inicia a execução para o primeiro post.",
               planning: "Indica objetivo, público e tom para eu preparar copy e imagem.",
               copy_review: "Passo 1 de 2: revê o texto, edita se precisares e clica em «Aprovar copy».",
               image_confirm: "Passo 2 de 2: copy aprovada. Queres o criativo visual?",
               image_review: "Revê a imagem. Aprova ou regenera com novas instruções.",
               completed: "Copy e imagem concluídos.",
               redirect: "Este pedido é do agente especializado — continua na página dele.",
-              idle: "Copy e imagem aqui; Instagram/LinkedIn operacional no agente dedicado."
+              idle: "Começa por definir a tua estratégia LinkedIn ou pede copy/imagem."
             }[mode] || "";
 
-            let workflowHtml = "";
+            let workflowHtml = renderStrategyPanel(strategy, mode);
             if (post && post.body) {
               const readonly = mode !== "copy_review";
               const metaParts = [];
@@ -2249,6 +2380,8 @@ def home() -> str:
             `;
           }
 
+          window.approveStrategy = () => directorAction("approve_strategy", {}, "Aprovo a estratégia.");
+          window.startExecution = () => directorAction("start_execution", {}, "Iniciar execução.");
           window.approveCopy = () => directorAction("approve_copy", {}, "Aprovo a copy.");
           window.saveCopyEdit = () => {
             const el = document.getElementById("workflowPostBody");
@@ -2274,12 +2407,22 @@ def home() -> str:
           function resetChat() {
             messages.length = 0;
             workflowState = null;
+            saveWorkflowState();
             chatLog.innerHTML = "";
             result.innerHTML = "<p>Conversa reiniciada.</p>";
-            addMessage("assistant", "Olá! Para copy e imagem fico aqui contigo. Para Instagram ou LinkedIn (perfil, posts, calendário), encaminho-te para o agente certo.");
+            addMessage("assistant", "Olá! Sou o teu Diretor de Marketing. Diz-me os teus objetivos LinkedIn (seguidores, SSI, ranking, ICP) e eu defino a estratégia antes de produzir posts.");
           }
 
-          addMessage("assistant", "Olá! Para copy e imagem fico aqui contigo. Para Instagram ou LinkedIn (perfil, posts, calendário), encaminho-te para o agente certo.");
+          loadWorkflowState();
+          addMessage("assistant", "Olá! Sou o teu Diretor de Marketing. Diz-me os teus objetivos LinkedIn (seguidores, SSI, ranking, ICP) e eu defino a estratégia antes de produzir posts.");
+          if (workflowState && workflowState.strategy) {
+            renderDirectorPanel({
+              orchestration_mode: workflowState.stage || "strategy_review",
+              execution_plan: workflowState.execution_plan || "",
+              deliverables: { strategy: workflowState.strategy, post: workflowState.post, image: workflowState.image },
+              workflow_state: workflowState
+            });
+          }
           chatInput.addEventListener("keydown", (event) => {
             if (event.key === "Enter" && !event.shiftKey) {
               event.preventDefault();

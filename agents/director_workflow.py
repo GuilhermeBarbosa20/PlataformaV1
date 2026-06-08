@@ -1,12 +1,12 @@
-"""Fluxo operacional do Diretor: copy → aprovação → imagem → aprovação.
+"""Fluxo operacional do Diretor: estratégia → copy → imagem → aprovações.
 
 Toda a execução acontece na chatroom do Diretor (`/`), sem obrigar o utilizador
-a mudar de página para aprovar copy ou gerar imagem.
+a mudar de página. O utilizador fala só com o Diretor; este define estratégia
+LinkedIn (objetivos SMART, ICP, pilares) e depois delega copy e design.
 """
 
 from __future__ import annotations
 
-import json
 import re
 import uuid
 from typing import Any, Callable, Dict, List, Optional, Sequence
@@ -15,6 +15,12 @@ from openai import OpenAI
 
 from agents.copywriter import copywriter_agent
 from agents.designer import designer_agent
+from agents.director_strategy import (
+    format_strategy_summary_markdown,
+    generate_linkedin_strategy,
+    is_linkedin_strategy_intent,
+    strategy_brief_for_execution,
+)
 from agents.director_team import (
     build_conversation_brief,
     build_team_task_payload,
@@ -23,12 +29,17 @@ from agents.director_team import (
 )
 
 STAGE_IDLE = "idle"
+STAGE_STRATEGY_BRIEF = "strategy_brief"
+STAGE_STRATEGY_REVIEW = "strategy_review"
+STAGE_STRATEGY_APPROVED = "strategy_approved"
 STAGE_PLANNING = "planning"
 STAGE_COPY_REVIEW = "copy_review"
 STAGE_IMAGE_CONFIRM = "image_confirm"
 STAGE_IMAGE_REVIEW = "image_review"
 STAGE_COMPLETED = "completed"
 
+ACTION_APPROVE_STRATEGY = "approve_strategy"
+ACTION_START_EXECUTION = "start_execution"
 ACTION_APPROVE_COPY = "approve_copy"
 ACTION_EDIT_COPY = "edit_copy"
 ACTION_GENERATE_IMAGE = "generate_image"
@@ -84,6 +95,7 @@ def _new_workflow_state() -> Dict[str, Any]:
         "stage": STAGE_IDLE,
         "execution_plan": "",
         "channels": [],
+        "strategy": None,
         "post": None,
         "copy": None,
         "image": None,
@@ -100,6 +112,9 @@ def normalize_workflow_state(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     stage = str(raw.get("stage", STAGE_IDLE)).strip() or STAGE_IDLE
     if stage in {
         STAGE_IDLE,
+        STAGE_STRATEGY_BRIEF,
+        STAGE_STRATEGY_REVIEW,
+        STAGE_STRATEGY_APPROVED,
         STAGE_PLANNING,
         STAGE_COPY_REVIEW,
         STAGE_IMAGE_CONFIRM,
@@ -109,6 +124,8 @@ def normalize_workflow_state(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         state["stage"] = stage
     state["execution_plan"] = str(raw.get("execution_plan", "")).strip()
     state["channels"] = raw.get("channels") if isinstance(raw.get("channels"), list) else []
+    if isinstance(raw.get("strategy"), dict):
+        state["strategy"] = raw["strategy"]
     if isinstance(raw.get("post"), dict):
         state["post"] = raw["post"]
     if isinstance(raw.get("copy"), dict):
@@ -126,6 +143,13 @@ def detect_action_from_text(text: str) -> Optional[str]:
     normalized = text.lower().strip()
     if not normalized:
         return None
+    if re.search(r"\b(aprovo|aprovar)\s+(a\s+)?estrat[eé]gia\b", normalized):
+        return ACTION_APPROVE_STRATEGY
+    if re.search(
+        r"\b(iniciar|come[cç]ar|comecar)\s+(a\s+)?execu[cç][aã]o\b",
+        normalized,
+    ):
+        return ACTION_START_EXECUTION
     if re.search(r"\b(aprovo|aprovado|aprovar|está bem|esta bem|ok para copy|copy ok)\b", normalized):
         return ACTION_APPROVE_COPY
     if re.search(r"\b(gera(r)?\s+(a\s+)?imagem|cria(r)?\s+(a\s+)?imagem|imagem sim)\b", normalized):
@@ -314,6 +338,142 @@ def _generate_post_image(
     )
 
 
+def _deliverables_from_state(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Monta pacote de entregáveis visível no painel do Diretor."""
+
+    return {
+        "strategy": state.get("strategy"),
+        "post": state.get("post"),
+        "copy": state.get("copy"),
+        "image": state.get("image"),
+    }
+
+
+def _strategy_panel_reply(strategy: Dict[str, Any], intro: str) -> str:
+    """Combina mensagem introdutória com resumo markdown da estratégia."""
+
+    summary = format_strategy_summary_markdown(strategy)
+    if not summary:
+        return intro
+    return f"{intro}\n\n{summary}".strip()
+
+
+def _generate_and_review_strategy(
+    *,
+    client: OpenAI,
+    model: str,
+    messages: Sequence[Dict[str, str]],
+    language: str,
+    state: Dict[str, Any],
+    previous_strategy: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Gera estratégia LinkedIn e prepara estado para revisão pelo utilizador.
+
+    Argumentos:
+        client: Cliente OpenAI.
+        model: Modelo LLM.
+        messages: Histórico da conversa.
+        language: Idioma da resposta.
+        state: Estado mutável do workflow.
+        previous_strategy: Estratégia anterior para refinamento.
+
+    Retorno:
+        Payload parcial com ``reply``, ``workflow_state`` e ``deliverables``.
+    """
+
+    result = generate_linkedin_strategy(
+        client,
+        model,
+        messages,
+        language,
+        previous_strategy=previous_strategy,
+    )
+    strategy = result.get("strategy") or {}
+    needs_clarification = bool(result.get("needs_clarification"))
+
+    if needs_clarification or not strategy.get("smart_objectives"):
+        state["stage"] = STAGE_STRATEGY_BRIEF
+        state["strategy"] = strategy if strategy.get("summary") else None
+        state["pending_actions"] = []
+        reply = str(result.get("reply") or "").strip()
+        reply = reply or "Preciso de mais detalhes: objetivos com prazo, ICP e métricas actuais."
+        return {
+            "reply": reply,
+            "orchestration_mode": STAGE_STRATEGY_BRIEF,
+            "workflow_state": state,
+            "pending_actions": [],
+            "deliverables": _deliverables_from_state(state),
+        }
+
+    state["strategy"] = strategy
+    state["stage"] = STAGE_STRATEGY_REVIEW
+    state["channels"] = ["linkedin"]
+    state["execution_plan"] = strategy.get("summary") or ""
+    state["pending_actions"] = [ACTION_APPROVE_STRATEGY, ACTION_START_EXECUTION]
+    intro = str(result.get("reply") or "").strip()
+    intro = intro or "Defini a estratégia LinkedIn abaixo. Revê e aprova quando estiveres alinhado."
+    return {
+        "reply": _strategy_panel_reply(strategy, intro),
+        "orchestration_mode": STAGE_STRATEGY_REVIEW,
+        "workflow_state": state,
+        "pending_actions": state["pending_actions"],
+        "deliverables": _deliverables_from_state(state),
+        "agents_involved": [],
+    }
+
+
+def _start_copy_from_strategy(
+    *,
+    state: Dict[str, Any],
+    sanitized: Sequence[Dict[str, str]],
+    language: str,
+    reply_prefix: str = "",
+) -> Dict[str, Any]:
+    """Delega ao Copywriter o primeiro post com base na estratégia aprovada.
+
+    Argumentos:
+        state: Estado do workflow com estratégia aprovada.
+        sanitized: Histórico da conversa.
+        language: Idioma da copy.
+        reply_prefix: Texto opcional a prefixar na resposta ao utilizador.
+
+    Retorno:
+        Payload com copy gerada e estado em ``copy_review``.
+
+    Raises:
+        RuntimeError: Se o Copywriter não estiver configurado.
+        Exception: Falhas na geração de copy.
+    """
+
+    strategy = state.get("strategy") or {}
+    strategy_brief = strategy_brief_for_execution(strategy)
+    conversation = build_conversation_brief(sanitized)
+    copy_brief = (
+        f"{strategy_brief}\n\n"
+        "Tarefa: produzir o primeiro post LinkedIn da semana, alinhado com o pilar "
+        "de maior percentagem e com tom profissional para o ICP definido."
+    )
+    copy_result = _generate_campaign_copy(conversation, copy_brief, language)
+    post = post_from_copywriter(copy_result, channel="linkedin")
+    state["copy"] = copy_result
+    state["post"] = post
+    state["stage"] = STAGE_COPY_REVIEW
+    state["pending_actions"] = [ACTION_APPROVE_COPY, ACTION_EDIT_COPY]
+    prefix = f"{reply_prefix}\n\n" if reply_prefix else ""
+    return {
+        "reply": (
+            f"{prefix}"
+            "A equipa preparou a copy do primeiro post com base na estratégia aprovada. "
+            "**Revê no painel** e clica em «Aprovar copy» quando estiveres satisfeito."
+        ).strip(),
+        "orchestration_mode": STAGE_COPY_REVIEW,
+        "workflow_state": state,
+        "pending_actions": state["pending_actions"],
+        "deliverables": _deliverables_from_state(state),
+        "agents_involved": ["Agente Copywriter"],
+    }
+
+
 def process_director_turn(
     *,
     messages: Sequence[Dict[str, str]],
@@ -379,15 +539,124 @@ def process_director_turn(
         "ready_to_route": False,
         "agent_name": None,
         "workflow_state": state,
-        "deliverables": {
-            "post": state.get("post"),
-            "copy": state.get("copy"),
-            "image": state.get("image"),
-        },
+        "deliverables": _deliverables_from_state(state),
         "pending_actions": state.get("pending_actions") or [],
     }
 
-    # --- Acções explícitas do fluxo ---
+    # --- Estratégia LinkedIn ---
+    if action == ACTION_APPROVE_STRATEGY and state["stage"] == STAGE_STRATEGY_REVIEW:
+        state["stage"] = STAGE_STRATEGY_APPROVED
+        state["pending_actions"] = [ACTION_START_EXECUTION]
+        strategy = state.get("strategy") or {}
+        base_response["reply"] = (
+            "Estratégia aprovada. Quando quiseres, clica em «Iniciar execução» "
+            "para a equipa produzir o primeiro post alinhado com o plano."
+        )
+        base_response["orchestration_mode"] = STAGE_STRATEGY_APPROVED
+        base_response["workflow_state"] = state
+        base_response["pending_actions"] = state["pending_actions"]
+        base_response["deliverables"] = _deliverables_from_state(state)
+        base_response["execution_plan"] = strategy.get("summary") or state.get("execution_plan", "")
+        return base_response
+
+    if action == ACTION_START_EXECUTION and state["stage"] in {
+        STAGE_STRATEGY_REVIEW,
+        STAGE_STRATEGY_APPROVED,
+    }:
+        if state["stage"] == STAGE_STRATEGY_REVIEW:
+            state["stage"] = STAGE_STRATEGY_APPROVED
+        try:
+            result = _start_copy_from_strategy(
+                state=state,
+                sanitized=sanitized,
+                language=language,
+                reply_prefix="Estratégia confirmada.",
+            )
+            base_response.update(result)
+            base_response["team_tasks"] = [
+                build_team_task_payload(
+                    {
+                        "agent_name": "Agente Copywriter",
+                        "status": "completed",
+                        "summary": (state.get("post") or {}).get("body", "")[:1500],
+                        "error": None,
+                    },
+                    agent_page_url,
+                )
+            ]
+            return base_response
+        except Exception as exc:  # noqa: BLE001
+            base_response["reply"] = f"Não consegui iniciar a execução agora: {exc!s}"
+            base_response["orchestration_mode"] = STAGE_STRATEGY_APPROVED
+            base_response["workflow_state"] = state
+            return base_response
+
+    if (
+        state["stage"] in {STAGE_STRATEGY_BRIEF, STAGE_STRATEGY_REVIEW}
+        and last_user_text
+        and not user_action
+    ):
+        strategy_result = _generate_and_review_strategy(
+            client=client,
+            model=openai_model,
+            messages=sanitized,
+            language=language,
+            state=state,
+            previous_strategy=state.get("strategy"),
+        )
+        base_response.update(strategy_result)
+        if state["stage"] == STAGE_STRATEGY_REVIEW:
+            base_response["reply"] = (
+                f"{strategy_result.get('reply', '')}\n\n"
+                "(Refinei a estratégia com o teu feedback. Revê e aprova quando estiver pronta.)"
+            ).strip()
+        return base_response
+
+    if state["stage"] == STAGE_STRATEGY_APPROVED and last_user_text and not user_action:
+        normalized_approved = normalize_text(last_user_text)
+        if _is_copy_or_design_request(normalized_approved) or "post" in normalized_approved:
+            try:
+                result = _start_copy_from_strategy(
+                    state=state,
+                    sanitized=sanitized,
+                    language=language,
+                )
+                base_response.update(result)
+                base_response["team_tasks"] = [
+                    build_team_task_payload(
+                        {
+                            "agent_name": "Agente Copywriter",
+                            "status": "completed",
+                            "summary": (state.get("post") or {}).get("body", "")[:1500],
+                            "error": None,
+                        },
+                        agent_page_url,
+                    )
+                ]
+                return base_response
+            except Exception as exc:  # noqa: BLE001
+                base_response["reply"] = f"Não consegui gerar a copy: {exc!s}"
+                return base_response
+        base_response["reply"] = (
+            "Estratégia aprovada. Clica em «Iniciar execução» para o primeiro post "
+            "ou pede outro post alinhado com o plano."
+        )
+        base_response["workflow_state"] = state
+        base_response["pending_actions"] = state.get("pending_actions") or []
+        return base_response
+
+    if state["stage"] == STAGE_STRATEGY_REVIEW and user_action and action not in {
+        ACTION_APPROVE_STRATEGY,
+        ACTION_START_EXECUTION,
+    }:
+        base_response["reply"] = (
+            "Revê a estratégia no painel. Usa «Aprovar estratégia» ou «Iniciar execução»."
+        )
+        base_response["workflow_state"] = state
+        base_response["pending_actions"] = state.get("pending_actions") or []
+        return base_response
+
+    # --- Acções explícitas do fluxo copy/imagem ---
     if action == ACTION_APPROVE_COPY and state["stage"] == STAGE_COPY_REVIEW:
         post = state.get("post") or {}
         if post:
@@ -403,7 +672,7 @@ def process_director_turn(
         base_response["orchestration_mode"] = STAGE_IMAGE_CONFIRM
         base_response["workflow_state"] = state
         base_response["pending_actions"] = state["pending_actions"]
-        base_response["deliverables"] = {"post": state.get("post"), "copy": state.get("copy"), "image": None}
+        base_response["deliverables"] = _deliverables_from_state(state)
         return base_response
 
     if action == ACTION_EDIT_COPY and state["stage"] == STAGE_COPY_REVIEW:
@@ -416,7 +685,7 @@ def process_director_turn(
         base_response["reply"] = "Atualizei o texto do post. Revê abaixo e clica em «Aprovar copy» quando estiver pronto."
         base_response["workflow_state"] = state
         base_response["pending_actions"] = state["pending_actions"]
-        base_response["deliverables"] = {"post": post, "copy": state.get("copy"), "image": None}
+        base_response["deliverables"] = _deliverables_from_state(state)
         return base_response
 
     if action == ACTION_SKIP_IMAGE and state["stage"] == STAGE_IMAGE_CONFIRM:
@@ -463,11 +732,7 @@ def process_director_turn(
         base_response["orchestration_mode"] = state["stage"]
         base_response["workflow_state"] = state
         base_response["pending_actions"] = state["pending_actions"]
-        base_response["deliverables"] = {
-            "post": state.get("post"),
-            "copy": state.get("copy"),
-            "image": state.get("image"),
-        }
+        base_response["deliverables"] = _deliverables_from_state(state)
         return base_response
 
     if action == ACTION_APPROVE_IMAGE and state["stage"] == STAGE_IMAGE_REVIEW:
@@ -480,11 +745,7 @@ def process_director_turn(
         base_response["reply"] = "Pacote concluído: copy e imagem aprovados. Podes reutilizar estes materiais na tua campanha."
         base_response["orchestration_mode"] = STAGE_COMPLETED
         base_response["workflow_state"] = state
-        base_response["deliverables"] = {
-            "post": state.get("post"),
-            "copy": state.get("copy"),
-            "image": state.get("image"),
-        }
+        base_response["deliverables"] = _deliverables_from_state(state)
         base_response["ready_to_route"] = False
         return base_response
 
@@ -502,19 +763,68 @@ def process_director_turn(
 
     # --- Novo pedido / campanha ---
     normalized_last = normalize_text(last_user_text) if last_user_text else ""
+    conversation_full = build_conversation_brief(sanitized)
+    strategy_intent = is_linkedin_strategy_intent(
+        f"{conversation_full}\n{last_user_text}"
+    )
+
+    if strategy_intent or (
+        state.get("strategy")
+        and state["stage"] in {STAGE_IDLE, STAGE_COMPLETED, STAGE_STRATEGY_BRIEF}
+        and "linkedin" in normalized_last
+    ):
+        strategy_result = _generate_and_review_strategy(
+            client=client,
+            model=openai_model,
+            messages=sanitized,
+            language=language,
+            state=state,
+            previous_strategy=state.get("strategy"),
+        )
+        base_response.update(strategy_result)
+        return base_response
+
+    if state["stage"] == STAGE_STRATEGY_APPROVED and _is_copy_or_design_request(
+        normalized_last
+    ):
+        try:
+            result = _start_copy_from_strategy(
+                state=state,
+                sanitized=sanitized,
+                language=language,
+            )
+            base_response.update(result)
+            base_response["team_tasks"] = [
+                build_team_task_payload(
+                    {
+                        "agent_name": "Agente Copywriter",
+                        "status": "completed",
+                        "summary": (state.get("post") or {}).get("body", "")[:1500],
+                        "error": None,
+                    },
+                    agent_page_url,
+                )
+            ]
+            return base_response
+        except Exception as exc:  # noqa: BLE001
+            base_response["reply"] = f"Não consegui gerar a copy: {exc!s}"
+            return base_response
+
     keyword_agents = infer_team_agents_from_keywords(
         normalized_last, routing_map, normalize_text, resolve_linkedin
     )
     if keyword_agents:
         keyword_agents = [correct_linkedin_agent(last_user_text, n) for n in keyword_agents]
 
-    redirect_agent = resolve_specialist_redirect(
-        normalized_last,
-        last_user_text,
-        keyword_agents,
-        resolve_linkedin,
-        correct_linkedin_agent,
-    )
+    redirect_agent = None
+    if not strategy_intent:
+        redirect_agent = resolve_specialist_redirect(
+            normalized_last,
+            last_user_text,
+            keyword_agents,
+            resolve_linkedin,
+            correct_linkedin_agent,
+        )
     if redirect_agent:
         return _build_redirect_response(redirect_agent, agent_page_url)
 
@@ -583,11 +893,7 @@ def process_director_turn(
         base_response["orchestration_mode"] = STAGE_COPY_REVIEW
         base_response["workflow_state"] = state
         base_response["pending_actions"] = state["pending_actions"]
-        base_response["deliverables"] = {
-            "post": post,
-            "copy": copy_result,
-            "image": None,
-        }
+        base_response["deliverables"] = _deliverables_from_state(state)
         return base_response
     except Exception as exc:  # noqa: BLE001
         base_response["reply"] = (
