@@ -319,6 +319,88 @@ def normalize_strategy(raw: Any) -> Dict[str, Any]:
     return base
 
 
+def _parse_llm_json(raw: str) -> Dict[str, Any]:
+    """Interpreta JSON devolvido pelo modelo, tolerando markdown ou ruído.
+
+    Argumentos:
+        raw: Texto bruto da resposta do LLM.
+
+    Retorno:
+        Dicionário parseado; dicionário vazio se não for possível interpretar.
+    """
+
+    text = (raw or "").strip()
+    if not text:
+        return {}
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s*```$", "", text)
+    try:
+        data = json.loads(text)
+        return data if isinstance(data, dict) else {}
+    except json.JSONDecodeError:
+        pass
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end > start:
+        try:
+            data = json.loads(text[start : end + 1])
+            return data if isinstance(data, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
+def sanitize_strategy_chat_reply(text: str) -> str:
+    """Garante que o chat nunca mostra JSON cru ao utilizador.
+
+    Se o modelo devolver o objecto JSON inteiro no campo de mensagem, extrai
+    apenas o texto legível em ``reply`` ou devolve uma frase curta por defeito.
+
+    Argumentos:
+        text: Texto candidato a mostrar na bolha do chat.
+
+    Retorno:
+        Mensagem curta e legível para o utilizador.
+    """
+
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return "Defini a estratégia LinkedIn. Revê o plano completo no painel abaixo."
+
+    if cleaned.startswith("{") and ("\"strategy\"" in cleaned or "'strategy'" in cleaned):
+        data = _parse_llm_json(cleaned)
+        inner = str(data.get("reply") or "").strip()
+        if inner and not inner.startswith("{"):
+            return inner
+
+    if cleaned.startswith("{") and len(cleaned) > 120:
+        return "Defini a estratégia LinkedIn. Revê o plano completo no painel abaixo."
+
+    if len(cleaned) > 900:
+        return cleaned[:320].rstrip() + "…\n\n(Detalhes completos no painel abaixo.)"
+
+    return cleaned
+
+
+def strategy_has_core_content(strategy: Dict[str, Any]) -> bool:
+    """Indica se a estratégia tem dados suficientes para mostrar no painel.
+
+    Argumentos:
+        strategy: Estratégia normalizada.
+
+    Retorno:
+        ``True`` quando há objetivos, pilares ou ICP/resumo utilizáveis.
+    """
+
+    if not strategy:
+        return False
+    if strategy.get("smart_objectives") or strategy.get("content_pillars"):
+        return True
+    icp = strategy.get("icp") if isinstance(strategy.get("icp"), dict) else {}
+    return bool(strategy.get("summary") and (icp.get("persona_label") or icp.get("description")))
+
+
 def generate_linkedin_strategy(
     client: OpenAI,
     model: str,
@@ -363,6 +445,9 @@ def generate_linkedin_strategy(
         "Se faltarem dados críticos (ex.: ICP ou prazo), needs_clarification=true "
         "e faz no máximo 2 perguntas curtas em reply. "
         "Se já tiveres informação suficiente, needs_clarification=false. "
+        "O campo reply deve ter NO MÁXIMO 3 frases curtas em linguagem natural — "
+        "NUNCA incluas JSON, listas longas nem o conteúdo de strategy no reply; "
+        "os detalhes ficam só no objecto strategy. "
         "Responde APENAS com JSON válido: "
         '{"reply":"<mensagem ao utilizador apresentando a estratégia>",'
         '"needs_clarification":true|false,'
@@ -393,19 +478,22 @@ def generate_linkedin_strategy(
         ],
     )
     raw = (response.choices[0].message.content or "").strip()
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
+    data = _parse_llm_json(raw)
+    if not data:
         return {
             "strategy": _default_strategy(),
-            "reply": raw or "Preciso de mais detalhes sobre os teus objetivos LinkedIn.",
+            "reply": "Preciso de mais detalhes sobre os teus objetivos LinkedIn.",
             "needs_clarification": True,
         }
 
     strategy = normalize_strategy(data.get("strategy"))
+    if not strategy_has_core_content(strategy) and isinstance(data.get("strategy"), dict):
+        strategy = normalize_strategy(data)
+
+    reply = sanitize_strategy_chat_reply(str(data.get("reply") or "").strip())
     return {
         "strategy": strategy,
-        "reply": str(data.get("reply") or "").strip(),
+        "reply": reply,
         "needs_clarification": bool(data.get("needs_clarification", False)),
     }
 

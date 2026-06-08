@@ -16,10 +16,11 @@ from openai import OpenAI
 from agents.copywriter import copywriter_agent
 from agents.designer import designer_agent
 from agents.director_strategy import (
-    format_strategy_summary_markdown,
     generate_linkedin_strategy,
     is_linkedin_strategy_intent,
+    sanitize_strategy_chat_reply,
     strategy_brief_for_execution,
+    strategy_has_core_content,
 )
 from agents.director_team import (
     build_conversation_brief,
@@ -349,13 +350,13 @@ def _deliverables_from_state(state: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _strategy_panel_reply(strategy: Dict[str, Any], intro: str) -> str:
-    """Combina mensagem introdutória com resumo markdown da estratégia."""
+def _strategy_chat_reply(intro: str) -> str:
+    """Mensagem curta no chat; detalhes ficam só no painel inferior."""
 
-    summary = format_strategy_summary_markdown(strategy)
-    if not summary:
-        return intro
-    return f"{intro}\n\n{summary}".strip()
+    text = sanitize_strategy_chat_reply(intro)
+    if "painel" in text.casefold():
+        return text
+    return f"{text}\n\nRevê o plano completo no painel abaixo.".strip()
 
 
 def _generate_and_review_strategy(
@@ -390,13 +391,14 @@ def _generate_and_review_strategy(
     )
     strategy = result.get("strategy") or {}
     needs_clarification = bool(result.get("needs_clarification"))
+    reply = _strategy_chat_reply(str(result.get("reply") or "").strip())
 
-    if needs_clarification or not strategy.get("smart_objectives"):
+    if not strategy_has_core_content(strategy):
         state["stage"] = STAGE_STRATEGY_BRIEF
-        state["strategy"] = strategy if strategy.get("summary") else None
+        state["strategy"] = None
         state["pending_actions"] = []
-        reply = str(result.get("reply") or "").strip()
-        reply = reply or "Preciso de mais detalhes: objetivos com prazo, ICP e métricas actuais."
+        if not reply or reply.startswith("{"):
+            reply = "Preciso de mais detalhes: objetivos com prazo, ICP e métricas actuais."
         return {
             "reply": reply,
             "orchestration_mode": STAGE_STRATEGY_BRIEF,
@@ -410,10 +412,14 @@ def _generate_and_review_strategy(
     state["channels"] = ["linkedin"]
     state["execution_plan"] = strategy.get("summary") or ""
     state["pending_actions"] = [ACTION_APPROVE_STRATEGY, ACTION_START_EXECUTION]
-    intro = str(result.get("reply") or "").strip()
-    intro = intro or "Defini a estratégia LinkedIn abaixo. Revê e aprova quando estiveres alinhado."
+    if needs_clarification:
+        reply = _strategy_chat_reply(
+            "Montei um plano inicial com o que tenho. Revê no painel e diz-me se falta algo."
+        )
+    elif not reply or reply.startswith("{"):
+        reply = _strategy_chat_reply("Defini a estratégia LinkedIn.")
     return {
-        "reply": _strategy_panel_reply(strategy, intro),
+        "reply": reply,
         "orchestration_mode": STAGE_STRATEGY_REVIEW,
         "workflow_state": state,
         "pending_actions": state["pending_actions"],

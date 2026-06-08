@@ -2156,12 +2156,30 @@ def home() -> str:
               .replace(/"/g, "&quot;");
           }
 
+          function sanitizeChatReply(text) {
+            const t = String(text || "").trim();
+            if (!t) return "Percebi.";
+            if (t.startsWith("{") && t.includes('"strategy"')) {
+              try {
+                const parsed = JSON.parse(t);
+                if (parsed && typeof parsed.reply === "string" && parsed.reply.trim()) {
+                  return parsed.reply.trim();
+                }
+              } catch (e) {}
+              return "Defini a estratégia LinkedIn. Revê o plano completo no painel abaixo.";
+            }
+            if (t.startsWith("{") && t.length > 120) {
+              return "Defini a estratégia LinkedIn. Revê o plano completo no painel abaixo.";
+            }
+            return t;
+          }
+
           function applyDirectorResponse(data) {
             if (data.workflow_state) {
               workflowState = data.workflow_state;
               saveWorkflowState();
             }
-            addMessage("assistant", data.reply || "Percebi.");
+            addMessage("assistant", sanitizeChatReply(data.reply));
             renderDirectorPanel(data);
           }
 
@@ -2212,15 +2230,19 @@ def home() -> str:
 
           function renderStrategyPanel(strategy, mode) {
             if (!strategy) return "";
+            const icp = strategy.icp || {};
             const hasContent = strategy.summary
               || (strategy.smart_objectives && strategy.smart_objectives.length)
-              || (strategy.content_pillars && strategy.content_pillars.length);
+              || (strategy.content_pillars && strategy.content_pillars.length)
+              || icp.persona_label
+              || icp.description;
             if (!hasContent) return "";
-            const icp = strategy.icp || {};
             const objectives = strategy.smart_objectives || [];
             const pillars = strategy.content_pillars || [];
             const cadence = strategy.cadence || {};
             const scenarios = strategy.scenarios || [];
+            const tactics = strategy.organic_tactics || [];
+            const formats = strategy.formats_mix || {};
 
             const objHtml = objectives.length
               ? `<ul class="strategy-list">${objectives.map((o) =>
@@ -2240,9 +2262,24 @@ def home() -> str:
               : "";
 
             const scenarioHtml = scenarios.length
-              ? `<ul class="strategy-list">${scenarios.map((s) =>
-                  `<li><strong>${escapeHtml(s.name || "")}</strong>: ${escapeHtml(s.description || "")}</li>`
-                ).join("")}</ul>`
+              ? `<ul class="strategy-list">${scenarios.map((s) => {
+                  const gain = s.weekly_follower_gain != null ? ` (+${s.weekly_follower_gain}/sem)` : "";
+                  return `<li><strong>${escapeHtml(s.name || "")}</strong>${escapeHtml(gain)}: ${escapeHtml(s.description || "")}</li>`;
+                }).join("")}</ul>`
+              : "";
+
+            const formatHtml = Object.keys(formats).length
+              ? `<p class="post-meta">${Object.entries(formats).map(([k, v]) => `${escapeHtml(k)} ${escapeHtml(String(v))}%`).join(" · ")}</p>`
+              : "";
+
+            const cadenceDays = (cadence.best_days || []).join(", ");
+            const cadenceTimes = (cadence.best_times || []).join(", ");
+            const cadenceHtml = cadence.posts_per_week
+              ? `<p class="post-meta">${cadence.posts_per_week} posts/semana${cadenceDays ? ` · ${escapeHtml(cadenceDays)}` : ""}${cadenceTimes ? ` · ${escapeHtml(cadenceTimes)}` : ""}</p>`
+              : "";
+
+            const tacticsHtml = tactics.length
+              ? `<ul class="strategy-list">${tactics.map((t) => `<li>${escapeHtml(t)}</li>`).join("")}</ul>`
               : "";
 
             let actionsHtml = "";
@@ -2269,8 +2306,10 @@ def home() -> str:
                 </div>
                 ${objectives.length ? `<div class="strategy-section"><h5>Objetivos SMART</h5>${objHtml}</div>` : ""}
                 ${pillars.length ? `<div class="strategy-section"><h5>Pilares de conteúdo (% semanal)</h5>${pillarHtml}</div>` : ""}
-                ${cadence.posts_per_week ? `<div class="strategy-section"><h5>Cadência</h5><p class="post-meta">${cadence.posts_per_week} posts/semana</p></div>` : ""}
+                ${cadenceHtml ? `<div class="strategy-section"><h5>Cadência</h5>${cadenceHtml}</div>` : ""}
+                ${formatHtml ? `<div class="strategy-section"><h5>Mix de formatos</h5>${formatHtml}</div>` : ""}
                 ${scenarios.length ? `<div class="strategy-section"><h5>Cenários</h5>${scenarioHtml}</div>` : ""}
+                ${tacticsHtml ? `<div class="strategy-section"><h5>Táticas orgânicas</h5>${tacticsHtml}</div>` : ""}
                 ${actionsHtml}
               </div>`;
           }
@@ -2297,8 +2336,8 @@ def home() -> str:
               idle: "Início"
             }[mode] || mode;
             const stageHint = {
-              strategy_brief: "Indica objetivos SMART, ICP e métricas actuais (ex.: seguidores, SSI, ranking).",
-              strategy_review: "Revê ICP, objetivos e pilares. Aprova a estratégia antes dos posts.",
+              strategy_brief: "Ainda faltam dados. Completa objetivos SMART, ICP e métricas no chat.",
+              strategy_review: "Plano estratégico abaixo. Aprova ou pede ajustes antes dos posts.",
               strategy_approved: "Estratégia fechada. Inicia a execução para o primeiro post.",
               planning: "Indica objetivo, público e tom para eu preparar copy e imagem.",
               copy_review: "Passo 1 de 2: revê o texto, edita se precisares e clica em «Aprovar copy».",
