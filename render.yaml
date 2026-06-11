@@ -11,3 +11,13 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: "3.11.9"
+
+  - type: cron
+    name: director-daily-digest
+    runtime: python
+    schedule: "0 8 * * *"
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -c "import os,urllib.request; u=os.environ.get('RENDER_EXTERNAL_URL','')+'/internal/cron/director-daily-digest'; r=urllib.request.Request(u,method='POST',headers={'Authorization':'Bearer '+os.environ.get('CRON_SECRET','')}); urllib.request.urlopen(r,timeout=60)"
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"

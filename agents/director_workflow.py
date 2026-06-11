@@ -16,9 +16,13 @@ from openai import OpenAI
 
 from agents.copywriter import copywriter_agent
 from agents.designer import designer_agent
+from agents.director_daily_digest import run_daily_digest, should_run_daily_digest
 from agents.director_engagement import (
+    DEFAULT_ENGAGEMENT_BATCH_SIZE,
     append_approved_engagement,
     generate_comment_for_followed_post,
+    generate_comments_batch,
+    pick_posts_for_engagement_batch,
 )
 from agents.director_follow_feed import (
     find_followed_post,
@@ -72,6 +76,8 @@ STAGE_IMAGE_CONFIRM = "image_confirm"
 STAGE_IMAGE_REVIEW = "image_review"
 STAGE_PUBLISH_CONFIRM = "publish_confirm"
 STAGE_ENGAGEMENT_REVIEW = "engagement_review"
+STAGE_ENGAGEMENT_BATCH_REVIEW = "engagement_batch_review"
+STAGE_DAILY_DIGEST_REVIEW = "daily_digest_review"
 STAGE_FOLLOWED_FEED = "followed_feed"
 STAGE_COMPLETED = "completed"
 
@@ -103,6 +109,10 @@ ACTION_APPROVE_ENGAGEMENT = "approve_engagement"
 ACTION_REJECT_ENGAGEMENT = "reject_engagement"
 ACTION_REGENERATE_ENGAGEMENT = "regenerate_engagement"
 ACTION_SKIP_ENGAGEMENT = "skip_engagement"
+ACTION_GENERATE_ENGAGEMENT_BATCH = "generate_engagement_batch"
+ACTION_APPROVE_ENGAGEMENT_BATCH = "approve_engagement_batch"
+ACTION_DISMISS_ENGAGEMENT_BATCH = "dismiss_engagement_batch"
+ACTION_RUN_DAILY_DIGEST = "run_daily_digest"
 ACTION_START_CAMPAIGN = "start_campaign"
 
 DIRECTOR_INTERNAL_AGENTS = ("Agente Copywriter", "Agente Designer")
@@ -201,7 +211,10 @@ def _new_workflow_state() -> Dict[str, Any]:
         "followed_posts_queue": [],
         "active_followed_post_id": "",
         "engagement_draft": None,
+        "engagement_batch": [],
         "engagement_log": [],
+        "daily_digest": None,
+        "last_daily_digest_at": "",
         "pending_actions": [],
         "standalone_image": False,
     }
@@ -227,6 +240,8 @@ def normalize_workflow_state(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         STAGE_IMAGE_REVIEW,
         STAGE_PUBLISH_CONFIRM,
         STAGE_ENGAGEMENT_REVIEW,
+        STAGE_ENGAGEMENT_BATCH_REVIEW,
+        STAGE_DAILY_DIGEST_REVIEW,
         STAGE_FOLLOWED_FEED,
         STAGE_COMPLETED,
     }:
@@ -268,6 +283,11 @@ def normalize_workflow_state(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     state["active_followed_post_id"] = str(raw.get("active_followed_post_id") or "").strip()
     if isinstance(raw.get("engagement_draft"), dict):
         state["engagement_draft"] = raw["engagement_draft"]
+    batch = raw.get("engagement_batch")
+    state["engagement_batch"] = batch if isinstance(batch, list) else []
+    if isinstance(raw.get("daily_digest"), dict):
+        state["daily_digest"] = raw["daily_digest"]
+    state["last_daily_digest_at"] = str(raw.get("last_daily_digest_at") or "").strip()
     log = raw.get("engagement_log")
     state["engagement_log"] = log if isinstance(log, list) else []
     actions = raw.get("pending_actions")
@@ -514,6 +534,7 @@ def _handle_followed_engagement_chat_intent(
         ACTION_MERGE_FOLLOWED_POSTS,
         ACTION_SELECT_FOLLOWED_POST,
         ACTION_GENERATE_ENGAGEMENT,
+        ACTION_GENERATE_ENGAGEMENT_BATCH,
     ]
 
     wants_suggest = (
@@ -997,7 +1018,10 @@ def _deliverables_from_state(state: Dict[str, Any]) -> Dict[str, Any]:
         "followed_posts_queue": state.get("followed_posts_queue") or [],
         "active_followed_post_id": state.get("active_followed_post_id") or "",
         "engagement_draft": state.get("engagement_draft"),
+        "engagement_batch": state.get("engagement_batch") or [],
         "engagement_log": state.get("engagement_log") or [],
+        "daily_digest": state.get("daily_digest"),
+        "last_daily_digest_at": state.get("last_daily_digest_at") or "",
     }
 
 
@@ -1183,6 +1207,69 @@ def _start_comment_review_for_followed_post(
         f"Sugeri um comentário para a publicação de **{author}**. "
         "Revê no painel — aprova para copiar e ir comentar, ou reprova."
     )
+
+
+def _start_engagement_batch_review(
+    *,
+    client: OpenAI,
+    model: str,
+    state: Dict[str, Any],
+    language: str,
+    count: int = DEFAULT_ENGAGEMENT_BATCH_SIZE,
+) -> Dict[str, Any]:
+    """Gera lote de comentários para várias publicações da fila.
+
+    Argumentos:
+        client: Cliente OpenAI.
+        model: Modelo LLM.
+        state: Estado mutável do workflow.
+        language: Idioma.
+        count: Número de publicações (máx. 15).
+
+    Retorno:
+        Payload parcial com ``engagement_batch`` e estágio ``engagement_batch_review``.
+    """
+
+    posts = pick_posts_for_engagement_batch(
+        state.get("followed_posts_queue") or [],
+        count=count,
+    )
+    if not posts:
+        state["stage"] = STAGE_FOLLOWED_FEED
+        state["pending_actions"] = [
+            ACTION_SELECT_FOLLOWED_POST,
+            ACTION_GENERATE_ENGAGEMENT,
+            ACTION_GENERATE_ENGAGEMENT_BATCH,
+        ]
+        return {
+            "reply": (
+                "Não há publicações pendentes na fila. Adiciona perfis, importa o feed "
+                "e clica em «Actualizar publicações»."
+            ),
+            "orchestration_mode": STAGE_FOLLOWED_FEED,
+            "workflow_state": state,
+            "pending_actions": state["pending_actions"],
+        }
+
+    drafts = generate_comments_batch(client, model, state, posts, language)
+    state["engagement_batch"] = drafts
+    state["engagement_draft"] = None
+    state["stage"] = STAGE_ENGAGEMENT_BATCH_REVIEW
+    state["pending_actions"] = [
+        ACTION_APPROVE_ENGAGEMENT_BATCH,
+        ACTION_DISMISS_ENGAGEMENT_BATCH,
+    ]
+    n = len(drafts)
+    return {
+        "reply": (
+            f"Preparei **{n} comentários** para publicações diferentes. "
+            "Marca os que queres aprovar no painel (podes editar o texto) e clica "
+            "«Aprovar seleccionados» — depois copias e colas no LinkedIn."
+        ),
+        "orchestration_mode": STAGE_ENGAGEMENT_BATCH_REVIEW,
+        "workflow_state": state,
+        "pending_actions": state["pending_actions"],
+    }
 
 
 def _advance_calendar_or_complete(state: Dict[str, Any]) -> str:
@@ -1447,6 +1534,22 @@ def _classify_user_intent_with_fallback(
         elif _should_enter_linkedin_strategy(state, last_user_text):
             classification["intent"] = "linkedin_strategy"
             classification["confidence"] = 0.75
+        elif any(
+            m in normalized
+            for m in (
+                "lote de coment",
+                "varios coment",
+                "vários coment",
+                "10 coment",
+                "15 coment",
+                "comentarios em lote",
+            )
+        ):
+            classification["intent"] = "engagement_batch"
+            classification["confidence"] = 0.8
+        elif any(m in normalized for m in ("briefing", "analise diaria", "análise diária", "resumo do dia")):
+            classification["intent"] = "daily_digest"
+            classification["confidence"] = 0.75
 
     return classification
 
@@ -1509,6 +1612,26 @@ def _apply_director_intent_classification(
             "pending_actions": state.get("pending_actions") or [],
             "agents_involved": [],
         }
+
+    if intent == "daily_digest":
+        try:
+            return run_daily_digest(client, model, state, language)
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "reply": f"Não consegui gerar o briefing diário: {exc!s}",
+                "orchestration_mode": str(state.get("stage") or STAGE_IDLE),
+                "workflow_state": state,
+            }
+
+    if intent == "engagement_batch":
+        count = int(classification.get("batch_count") or DEFAULT_ENGAGEMENT_BATCH_SIZE)
+        return _start_engagement_batch_review(
+            client=client,
+            model=model,
+            state=state,
+            language=language,
+            count=count,
+        )
 
     if intent in {"followed_profiles", "engagement_comment"}:
         auto_flag = classification.get("auto_suggest_profiles")
@@ -1736,6 +1859,18 @@ def process_director_turn(
         )
         if routed is not None:
             base_response.update(routed)
+            return base_response
+
+    if action == ACTION_RUN_DAILY_DIGEST:
+        try:
+            digest_result = run_daily_digest(
+                client, openai_model, state, language
+            )
+            base_response.update(digest_result)
+            base_response["deliverables"] = _deliverables_from_state(state)
+            return base_response
+        except Exception as exc:  # noqa: BLE001
+            base_response["reply"] = f"Não consegui gerar o briefing diário: {exc!s}"
             return base_response
 
     # --- Estratégia LinkedIn ---
@@ -2165,6 +2300,89 @@ def process_director_turn(
         base_response["deliverables"] = _deliverables_from_state(state)
         return base_response
 
+    if action == ACTION_GENERATE_ENGAGEMENT_BATCH:
+        try:
+            count = int(payload.get("count") or DEFAULT_ENGAGEMENT_BATCH_SIZE)
+        except (TypeError, ValueError):
+            count = DEFAULT_ENGAGEMENT_BATCH_SIZE
+        batch_result = _start_engagement_batch_review(
+            client=client,
+            model=model,
+            state=state,
+            language=language,
+            count=count,
+        )
+        base_response.update(batch_result)
+        base_response["deliverables"] = _deliverables_from_state(state)
+        return base_response
+
+    if action == ACTION_APPROVE_ENGAGEMENT_BATCH and state["stage"] == STAGE_ENGAGEMENT_BATCH_REVIEW:
+        approved_ids = payload.get("approved_ids")
+        id_set = {str(i) for i in approved_ids} if isinstance(approved_ids, list) else set()
+        items_payload = payload.get("items")
+        edits: Dict[str, str] = {}
+        if isinstance(items_payload, list):
+            for row in items_payload:
+                if isinstance(row, dict) and row.get("id"):
+                    edits[str(row["id"])] = str(row.get("comment_body") or "").strip()
+
+        batch = list(state.get("engagement_batch") or [])
+        approved_count = 0
+        for draft in batch:
+            if not isinstance(draft, dict):
+                continue
+            did = str(draft.get("id") or "")
+            selected = bool(draft.get("batch_selected", True))
+            if id_set and did not in id_set:
+                continue
+            if not id_set and not selected:
+                continue
+            item = dict(draft)
+            if did in edits and edits[did]:
+                item["comment_body"] = edits[did]
+            if not str(item.get("comment_body") or "").strip():
+                continue
+            append_approved_engagement(state, item)
+            fpid = str(item.get("followed_post_id") or "")
+            if fpid:
+                state["followed_posts_queue"] = update_followed_post_status(
+                    state.get("followed_posts_queue") or [],
+                    fpid,
+                    "approved",
+                )
+            approved_count += 1
+
+        state["engagement_batch"] = []
+        state["stage"] = STAGE_FOLLOWED_FEED
+        state["pending_actions"] = [
+            ACTION_SELECT_FOLLOWED_POST,
+            ACTION_GENERATE_ENGAGEMENT,
+            ACTION_GENERATE_ENGAGEMENT_BATCH,
+        ]
+        base_response["reply"] = (
+            f"Aprovei **{approved_count}** comentário(s). Usa «Copiar aprovados» no painel "
+            "ou o histórico no estado — cola cada um na publicação respectiva no LinkedIn."
+        )
+        base_response["orchestration_mode"] = STAGE_FOLLOWED_FEED
+        base_response["workflow_state"] = state
+        base_response["deliverables"] = _deliverables_from_state(state)
+        base_response["pending_actions"] = state["pending_actions"]
+        return base_response
+
+    if action == ACTION_DISMISS_ENGAGEMENT_BATCH:
+        state["engagement_batch"] = []
+        state["stage"] = STAGE_FOLLOWED_FEED
+        state["pending_actions"] = [
+            ACTION_SELECT_FOLLOWED_POST,
+            ACTION_GENERATE_ENGAGEMENT,
+            ACTION_GENERATE_ENGAGEMENT_BATCH,
+        ]
+        base_response["reply"] = "Lote de comentários descartado."
+        base_response["orchestration_mode"] = STAGE_FOLLOWED_FEED
+        base_response["workflow_state"] = state
+        base_response["deliverables"] = _deliverables_from_state(state)
+        return base_response
+
     if action == ACTION_GENERATE_ENGAGEMENT:
         nxt = next_pending_followed_post(state.get("followed_posts_queue") or [])
         if not nxt:
@@ -2282,6 +2500,29 @@ def process_director_turn(
         base_response["orchestration_mode"] = STAGE_PUBLISH_CONFIRM
         base_response["workflow_state"] = state
         base_response["pending_actions"] = [ACTION_SKIP_PUBLISH]
+        base_response["deliverables"] = _deliverables_from_state(state)
+        return base_response
+
+    if state["stage"] == STAGE_ENGAGEMENT_BATCH_REVIEW and not user_action:
+        n_batch = len(state.get("engagement_batch") or [])
+        base_response["reply"] = (
+            f"Revê o lote de **{n_batch} comentários** no painel — marca os que queres "
+            "e clica em «Aprovar seleccionados»."
+        )
+        base_response["orchestration_mode"] = STAGE_ENGAGEMENT_BATCH_REVIEW
+        base_response["workflow_state"] = state
+        base_response["pending_actions"] = [
+            ACTION_APPROVE_ENGAGEMENT_BATCH,
+            ACTION_DISMISS_ENGAGEMENT_BATCH,
+        ]
+        base_response["deliverables"] = _deliverables_from_state(state)
+        return base_response
+
+    if state["stage"] == STAGE_DAILY_DIGEST_REVIEW and not user_action:
+        digest = state.get("daily_digest") or {}
+        base_response["reply"] = str(digest.get("summary") or "Briefing do dia no painel.")
+        base_response["orchestration_mode"] = STAGE_DAILY_DIGEST_REVIEW
+        base_response["workflow_state"] = state
         base_response["deliverables"] = _deliverables_from_state(state)
         return base_response
 

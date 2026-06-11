@@ -2395,7 +2395,8 @@ def home() -> str:
               return Boolean(ws.post || (ws.image && ws.image.image_url) || ws.execution_plan);
             }
             if (stage === "strategy_brief" && !ws.strategy) return false;
-            if (stage === "followed_feed" || stage === "engagement_review") return true;
+            if (stage === "followed_feed" || stage === "engagement_review" || stage === "engagement_batch_review") return true;
+            if (stage === "daily_digest_review" || ws.daily_digest) return true;
             return hasDeliverable;
           }
 
@@ -3352,8 +3353,8 @@ def home() -> str:
           function isDirectorLinkedinContext(mode, workflowState, deliverables) {
             const linkedinModes = new Set([
               "strategy_brief", "strategy_review", "strategy_approved",
-              "optimization_review", "posts_review", "publish_confirm",
-              "followed_feed", "engagement_review"
+              "optimization_review", "daily_digest_review", "posts_review", "publish_confirm",
+              "followed_feed", "engagement_review", "engagement_batch_review"
             ]);
             if (linkedinModes.has(mode)) return true;
             const ws = workflowState || {};
@@ -3421,6 +3422,7 @@ def home() -> str:
                   <button type="button" class="wf-btn wf-btn-secondary" onclick="syncLinkedInNetworkFeed()">Importar feed</button>
                   <button type="button" class="wf-btn wf-btn-strategy" onclick="promptAddFollowedProfile()">+ URL manual</button>
                   <button type="button" class="wf-btn wf-btn-secondary" onclick="refreshFollowedPosts()">Actualizar publicações</button>
+                  <button type="button" class="wf-btn wf-btn-approve" onclick="generateEngagementBatch()">Gerar lote (10 comentários)</button>
                 </div>
                 ${sugRows ? `<div style="margin-bottom:10px"><h5 style="margin:0 0 6px;font-size:0.85rem">Sugestões (confirma)</h5>${sugRows}
                   <button type="button" class="wf-btn wf-btn-approve" style="margin-top:6px;padding:6px 10px;font-size:0.75rem" onclick="acceptAllFollowedSuggestions()">Adicionar todas</button></div>` : ""}
@@ -3433,6 +3435,74 @@ def home() -> str:
               body,
               defaultOpen,
               "director-collapse--followed"
+            );
+          }
+
+          function renderDailyDigestPanel(digest, mode) {
+            if (!digest || (!digest.headline && !digest.summary)) return "";
+            const priorities = (digest.priorities || []).map((p) => `<li>${escapeHtml(p)}</li>`).join("");
+            const prioHtml = priorities ? `<ul class="strategy-list">${priorities}</ul>` : "";
+            const focus = digest.focus_today
+              ? `<p class="post-meta"><strong>Foco de hoje:</strong> ${escapeHtml(digest.focus_today)}</p>`
+              : "";
+            const body = `
+                <p class="post-meta">${escapeHtml(digest.summary || "")}</p>
+                ${focus}
+                ${prioHtml}
+                <div class="workflow-actions">
+                  <button type="button" class="wf-btn wf-btn-secondary" onclick="runDailyDigest()">Actualizar briefing</button>
+                </div>`;
+            return wrapDirectorCollapsiblePanel(
+              "daily_digest",
+              digest.headline || "Briefing do dia",
+              body,
+              mode === "daily_digest_review" || mode === "optimization_review",
+              "director-collapse--digest"
+            );
+          }
+
+          function renderEngagementBatchPanel(batch, mode) {
+            const items = Array.isArray(batch) ? batch : [];
+            if (!items.length) {
+              if (mode !== "engagement_batch_review") return "";
+              return `<div class="engagement-panel"><p class="post-meta">A gerar lote de comentários…</p></div>`;
+            }
+            const rows = items.map((item) => {
+              const id = String(item.id || "");
+              const checked = item.batch_selected !== false ? "checked" : "";
+              const url = item.target_url
+                ? `<a href="${escapeHtml(item.target_url)}" target="_blank" rel="noopener" style="font-size:0.75rem;color:#93c5fd">Abrir publicação</a>`
+                : "";
+              return `<div class="cal-row" data-batch-comment-id="${escapeHtml(id)}" style="align-items:flex-start;margin-bottom:10px">
+                <div style="flex:1">
+                  <label style="display:flex;gap:8px;align-items:flex-start;cursor:pointer">
+                    <input type="checkbox" class="batch-select" ${checked} style="margin-top:4px" />
+                    <div>
+                      <div class="cal-meta">${escapeHtml(item.target_label || item.author_name || "")}</div>
+                      ${item.target_snippet ? `<p class="post-meta" style="font-style:italic">«${escapeHtml(String(item.target_snippet).slice(0, 160))}»</p>` : ""}
+                      <textarea class="engagement-comment batch-comment-body" style="margin-top:6px;min-height:72px">${escapeHtml(item.comment_body || "")}</textarea>
+                      ${url}
+                    </div>
+                  </label>
+                </div>
+              </div>`;
+            }).join("");
+            const actions = mode === "engagement_batch_review" ? `
+              <div class="workflow-actions">
+                <button type="button" class="wf-btn wf-btn-approve" onclick="approveEngagementBatch()">Aprovar seleccionados</button>
+                <button type="button" class="wf-btn wf-btn-secondary" onclick="copyApprovedBatchToClipboard()">Copiar seleccionados</button>
+                <button type="button" class="wf-btn wf-btn-secondary" onclick="dismissEngagementBatch()">Descartar lote</button>
+              </div>` : "";
+            const body = `
+                <p class="post-meta">Marca os comentários que queres usar, edita se precisares, e aprova em lote.</p>
+                ${rows}
+                ${actions}`;
+            return wrapDirectorCollapsiblePanel(
+              "engagement_batch",
+              `Lote de comentários (${items.length})`,
+              body,
+              mode === "engagement_batch_review",
+              "director-collapse--batch"
             );
           }
 
@@ -3507,6 +3577,10 @@ def home() -> str:
               || (workflowState && workflowState.optimization_report) || null;
             const engagementDraft = deliverables.engagement_draft
               || (workflowState && workflowState.engagement_draft) || null;
+            const engagementBatch = deliverables.engagement_batch
+              || (workflowState && workflowState.engagement_batch) || [];
+            const dailyDigest = deliverables.daily_digest
+              || (workflowState && workflowState.daily_digest) || null;
             const followedProfiles = deliverables.followed_profiles
               || (workflowState && workflowState.followed_profiles) || [];
             const followedSuggestions = deliverables.followed_profile_suggestions
@@ -3526,6 +3600,8 @@ def home() -> str:
               image_review: "Revisão de imagem",
               publish_confirm: "Publicar no LinkedIn",
               engagement_review: "Comentário (aprovação)",
+              engagement_batch_review: "Lote de comentários",
+              daily_digest_review: "Briefing do dia",
               followed_feed: "Publicações de perfis seguidos",
               completed: "Concluído",
               redirect: "Encaminhamento",
@@ -3545,6 +3621,8 @@ def home() -> str:
               image_review: "Revê a imagem. Aprova ou regenera com novas instruções.",
               publish_confirm: "Autoriza a publicação OAuth e publica o post, ou avança sem publicar.",
               engagement_review: "Comentário para uma publicação de alguém que segues — aprova ou reprova.",
+              engagement_batch_review: "Revê o lote de comentários — marca, edita e aprova os que quiseres.",
+              daily_digest_review: "Briefing diário com prioridades e foco de hoje.",
               followed_feed: "Escolhe uma publicação para eu sugerir um comentário.",
               completed: "Semana ou post concluídos. Podes comentar em perfis que segues ou reanalisar.",
               redirect: "Este pedido é do agente especializado — continua na página dele.",
@@ -3555,10 +3633,12 @@ def home() -> str:
             setDirectorLinkedinBarVisible(linkedinContext);
             let workflowHtml = (linkedinContext ? renderProfilePanel(linkedinAnalysis) : "")
               + (linkedinContext ? renderStrategyPanel(strategy, mode) : "")
+              + renderDailyDigestPanel(dailyDigest, mode)
               + (linkedinContext ? renderOptimizationPanel(optimizationReport, mode) : "")
               + (linkedinContext ? renderCalendarPanel(calendar, activePostId, mode) : "")
               + (linkedinContext ? renderPublishPanel(post, mode) : "")
               + renderFollowedFeedPanel(followedProfiles, followedPostsQueue, followedSuggestions, mode, linkedinContext)
+              + renderEngagementBatchPanel(engagementBatch, mode)
               + (linkedinContext ? renderEngagementPanel(engagementDraft, mode) : "");
             if (post && post.body && mode !== "engagement_review") {
               const readonly = mode !== "copy_review";
@@ -3629,6 +3709,8 @@ def home() -> str:
             const showPanel = hasWorkflowContent
               || mode === "followed_feed"
               || mode === "engagement_review"
+              || mode === "engagement_batch_review"
+              || mode === "daily_digest_review"
               || (mode !== "idle" && mode !== "planning" && mode !== "strategy_brief");
             if (!showPanel) {
               result.innerHTML = "";
@@ -3796,6 +3878,71 @@ def home() -> str:
             const instr = window.prompt("O que queres mudar no comentário? (opcional)") || "";
             directorAction("regenerate_engagement", { edit_instructions: instr }, "Refazer comentário.");
           };
+          function shouldRunDailyDigest(ws) {
+            if (!ws || !ws.strategy) return false;
+            const smart = ws.strategy.smart_objectives || ws.strategy.content_pillars || ws.strategy.summary;
+            if (!smart) return false;
+            const today = new Date().toISOString().slice(0, 10);
+            return String(ws.last_daily_digest_at || "") !== today;
+          }
+
+          window.runDailyDigest = () => directorAction("run_daily_digest", {}, "Briefing diário.");
+          window.generateEngagementBatch = () => directorAction(
+            "generate_engagement_batch",
+            { count: 10 },
+            "Gera um lote de 10 comentários para publicações na fila."
+          );
+          window.approveEngagementBatch = () => {
+            const cards = document.querySelectorAll("[data-batch-comment-id]");
+            const approved_ids = [];
+            const items = [];
+            cards.forEach((card) => {
+              const id = card.getAttribute("data-batch-comment-id");
+              const cb = card.querySelector(".batch-select");
+              const ta = card.querySelector("textarea");
+              if (!id || !cb || !cb.checked) return;
+              approved_ids.push(id);
+              items.push({ id, comment_body: ta ? ta.value.trim() : "" });
+            });
+            if (!approved_ids.length) {
+              alert("Selecciona pelo menos um comentário.");
+              return;
+            }
+            directorAction(
+              "approve_engagement_batch",
+              { approved_ids, items },
+              "Aprovo os comentários seleccionados do lote."
+            );
+          };
+          window.dismissEngagementBatch = () => directorAction(
+            "dismiss_engagement_batch",
+            {},
+            "Descartar o lote de comentários."
+          );
+          window.copyApprovedBatchToClipboard = async () => {
+            const cards = document.querySelectorAll("[data-batch-comment-id]");
+            const parts = [];
+            cards.forEach((card) => {
+              const cb = card.querySelector(".batch-select");
+              const ta = card.querySelector("textarea");
+              if (!cb || !cb.checked || !ta) return;
+              const label = card.querySelector(".cal-meta");
+              const text = ta.value.trim();
+              if (!text) return;
+              parts.push(`--- ${label ? label.textContent : "Comentário"} ---\\n${text}`);
+            });
+            if (!parts.length) {
+              alert("Selecciona comentários para copiar.");
+              return;
+            }
+            try {
+              await navigator.clipboard.writeText(parts.join("\\n\\n"));
+              alert("Comentários copiados — cola cada um na publicação respectiva no LinkedIn.");
+            } catch (e) {
+              alert("Não foi possível copiar automaticamente.");
+            }
+          };
+
           window.copyEngagementToClipboard = async () => {
             const el = document.getElementById("directorEngagementBody");
             const text = el ? el.value.trim() : "";
@@ -3842,7 +3989,9 @@ def home() -> str:
                   linkedin_analysis: workflowState.linkedin_analysis,
                   linkedin_calendar: workflowState.linkedin_calendar,
                   optimization_report: workflowState.optimization_report,
+                  daily_digest: workflowState.daily_digest,
                   engagement_draft: workflowState.engagement_draft,
+                  engagement_batch: workflowState.engagement_batch,
                   followed_profiles: workflowState.followed_profiles,
                   followed_profile_suggestions: workflowState.followed_profile_suggestions,
                   followed_posts_queue: workflowState.followed_posts_queue,
@@ -3851,6 +4000,9 @@ def home() -> str:
                 },
                 workflow_state: workflowState,
               });
+            }
+            if (shouldRunDailyDigest(workflowState)) {
+              await directorAction("run_daily_digest", {}, "");
             }
           })();
           chatInput.addEventListener("keydown", (event) => {
@@ -3907,6 +4059,42 @@ def chat(payload: ChatRequest) -> Dict[str, object]:
         "justification": decision.get("execution_plan") or "",
         "agent_url": _agent_page_url(str(agent_name)) if agent_name else None,
         "ready_to_route": decision.get("ready_to_route", False),
+    }
+
+
+@app.post("/internal/cron/director-daily-digest")
+def cron_director_daily_digest(request: Request) -> Dict[str, object]:
+    """Endpoint para o cron Render (lembrete de digest diário).
+
+    O digest completo corre na primeira visita do utilizador ao Diretor
+    (estado no browser). Este endpoint valida o ``CRON_SECRET`` e regista
+    a execução agendada.
+
+    Argumentos:
+        request: Pedido HTTP com cabeçalho ``Authorization: Bearer <CRON_SECRET>``.
+
+    Retorno:
+        Estado ``ok`` e nota sobre o fluxo client-side.
+
+    Raises:
+        HTTPException: 503 se ``CRON_SECRET`` não estiver configurado; 403 se inválido.
+    """
+
+    secret = os.getenv("CRON_SECRET", "").strip()
+    if not secret:
+        raise HTTPException(
+            status_code=503,
+            detail="CRON_SECRET não configurado no servidor.",
+        )
+    auth = request.headers.get("Authorization", "")
+    if auth != f"Bearer {secret}":
+        raise HTTPException(status_code=403, detail="Não autorizado.")
+    return {
+        "ok": True,
+        "message": (
+            "Cron diário activo. O briefing corre quando o utilizador abre o Diretor "
+            "(uma vez por dia, se houver estratégia aprovada)."
+        ),
     }
 
 

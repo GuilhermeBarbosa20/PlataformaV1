@@ -18,6 +18,8 @@ VALID_DIRECTOR_INTENTS = frozenset(
         "continue_current",
         "followed_profiles",
         "engagement_comment",
+        "engagement_batch",
+        "daily_digest",
         "linkedin_strategy",
         "linkedin_posts",
         "linkedin_optimization",
@@ -127,7 +129,10 @@ def classify_director_intent(
         "- followed_profiles: quer sugestões ou gestão de perfis/pessoas para "
         "seguir no LinkedIn (engagement, networking).\n"
         "- engagement_comment: quer comentar publicações de terceiros / posts "
-        "de perfis que segue.\n"
+        "de perfis que segue (um de cada vez).\n"
+        "- engagement_batch: quer vários comentários de uma vez (ex.: 10 ou 15 "
+        "sugestões para aprovar em lote).\n"
+        "- daily_digest: quer briefing/análise do dia ou progresso diário.\n"
         "- linkedin_strategy: quer planear estratégia LinkedIn (objectivos, "
         "ICP, pilares, métricas).\n"
         "- linkedin_posts: quer gerar ou avançar posts/calendário a partir da "
@@ -147,11 +152,13 @@ def classify_director_intent(
         "3. Sinónimos: «pessoas para seguir», «quem seguir», «perfis para "
         "seguir» → followed_profiles.\n"
         "4. confidence entre 0 e 1.\n"
-        "5. auto_suggest_profiles: true quando devemos sugerir perfis por ICP.\n\n"
+        "5. auto_suggest_profiles: true quando devemos sugerir perfis por ICP.\n"
+        "6. batch_count: número de comentários em lote (por defeito 10, máx. 15) "
+        "quando intent=engagement_batch.\n\n"
         "JSON: "
         '{"intent":"<uma das intenções>","confidence":0.0,'
         '"user_goal":"<resumo em 1 frase>","auto_suggest_profiles":false,'
-        '"reply":"<só se intent=clarify>"}'
+        '"batch_count":10,"reply":"<só se intent=clarify>"}'
     )
     response = client.chat.completions.create(
         model=model,
@@ -189,10 +196,17 @@ def classify_director_intent(
         confidence = 0.5
     confidence = max(0.0, min(1.0, confidence))
 
+    try:
+        batch_count = int(data.get("batch_count") or 10)
+    except (TypeError, ValueError):
+        batch_count = 10
+    batch_count = max(1, min(15, batch_count))
+
     return {
         "intent": intent,
         "confidence": confidence,
         "user_goal": str(data.get("user_goal") or "").strip(),
         "auto_suggest_profiles": bool(data.get("auto_suggest_profiles", False)),
+        "batch_count": batch_count,
         "reply": str(data.get("reply") or "").strip(),
     }

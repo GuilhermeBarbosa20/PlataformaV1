@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from openai import OpenAI
 
@@ -101,6 +101,153 @@ def generate_comment_for_followed_post(
         "angle": str((data or {}).get("angle") or "").strip(),
         "status": "draft",
     }
+
+
+DEFAULT_ENGAGEMENT_BATCH_SIZE = 10
+
+
+def pick_posts_for_engagement_batch(
+    queue: List[Dict[str, Any]],
+    *,
+    count: int = DEFAULT_ENGAGEMENT_BATCH_SIZE,
+) -> List[Dict[str, Any]]:
+    """Selecciona publicações pendentes para um lote de comentários.
+
+    Argumentos:
+        queue: Fila ``followed_posts_queue``.
+        count: Número máximo de posts (por defeito 10).
+
+    Retorno:
+        Lista de entradas com ``status=pending``, até ``count`` itens.
+    """
+
+    pending = [
+        dict(p)
+        for p in (queue or [])
+        if isinstance(p, dict) and (p.get("status") or "pending") == "pending"
+    ]
+    return pending[: max(1, min(int(count or DEFAULT_ENGAGEMENT_BATCH_SIZE), 15))]
+
+
+def generate_comments_batch(
+    client: OpenAI,
+    model: str,
+    state: Dict[str, Any],
+    posts: List[Dict[str, Any]],
+    language: str,
+) -> List[Dict[str, Any]]:
+    """Gera vários rascunhos de comentário numa única chamada ao LLM.
+
+    Argumentos:
+        client: Cliente OpenAI.
+        model: Modelo de chat.
+        state: Estado do workflow (estratégia, ICP).
+        posts: Publicações seleccionadas da fila.
+        language: Idioma (ex.: ``pt-PT``).
+
+    Retorno:
+        Lista de rascunhos com ``followed_post_id``, ``comment_body``, metadados
+        e ``batch_selected=true`` por defeito para aprovação em lote.
+    """
+
+    if not posts:
+        return []
+
+    strategy = state.get("strategy") if isinstance(state.get("strategy"), dict) else {}
+    brief = strategy_brief_for_execution(strategy)
+    lines: List[str] = []
+    id_map: Dict[str, Dict[str, Any]] = {}
+    for idx, post in enumerate(posts, start=1):
+        pid = str(post.get("id") or "")
+        if not pid:
+            continue
+        author = str(post.get("author_name") or "Autor").strip()
+        snippet = str(post.get("snippet") or "").strip()[:400]
+        id_map[pid] = post
+        lines.append(
+            f'{idx}. post_id="{pid}" | autor={author} | texto="{snippet.replace(chr(34), chr(39))}"'
+        )
+
+    if not lines:
+        return []
+
+    system_prompt = (
+        f"És o Diretor de Marketing AI — engagement LinkedIn B2B. Responde em {language}. "
+        "Para cada publicação listada, escreve UM comentário profissional e útil "
+        "(2–5 frases, ~80 palavras máx.). Sem spam nem pitch. "
+        "JSON: "
+        '{"comments":[{"post_id":"...","comment_body":"...","angle":"..."}]}'
+    )
+    user_prompt = (
+        f"Estratégia do utilizador:\n{brief[:3500]}\n\n"
+        f"PUBLICAÇÕES ({len(lines)}):\n" + "\n".join(lines)
+    )
+    response = client.chat.completions.create(
+        model=model,
+        temperature=0.55,
+        max_tokens=4096,
+        response_format={"type": "json_object"},
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+    )
+    raw = (response.choices[0].message.content or "").strip()
+    data = _parse_llm_json(raw) or {}
+    comments_raw = data.get("comments") if isinstance(data.get("comments"), list) else []
+
+    drafts: List[Dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for item in comments_raw:
+        if not isinstance(item, dict):
+            continue
+        pid = str(item.get("post_id") or "").strip()
+        if not pid or pid in seen_ids or pid not in id_map:
+            continue
+        post = id_map[pid]
+        body = str(item.get("comment_body") or "").strip()
+        if not body:
+            continue
+        seen_ids.add(pid)
+        author = str(post.get("author_name") or "Autor").strip()
+        drafts.append(
+            {
+                "id": uuid.uuid4().hex[:12],
+                "followed_post_id": pid,
+                "target_label": f"Publicação de {author}",
+                "target_url": str(post.get("post_url") or "").strip(),
+                "target_snippet": str(post.get("snippet") or "")[:400],
+                "author_name": author,
+                "comment_body": body,
+                "angle": str(item.get("angle") or "").strip(),
+                "status": "draft",
+                "batch_selected": True,
+            }
+        )
+
+    for post in posts:
+        pid = str(post.get("id") or "")
+        if pid in seen_ids or not pid:
+            continue
+        author = str(post.get("author_name") or "Autor").strip()
+        drafts.append(
+            {
+                "id": uuid.uuid4().hex[:12],
+                "followed_post_id": pid,
+                "target_label": f"Publicação de {author}",
+                "target_url": str(post.get("post_url") or "").strip(),
+                "target_snippet": str(post.get("snippet") or "")[:400],
+                "author_name": author,
+                "comment_body": (
+                    f"Excelente reflexão, {author}. O ponto que destacaste faz sentido "
+                    "no contexto actual — como estão a medir o impacto disto na prática?"
+                ),
+                "angle": "fallback",
+                "status": "draft",
+                "batch_selected": True,
+            }
+        )
+    return drafts
 
 
 def append_approved_engagement(state: Dict[str, Any], draft: Dict[str, Any]) -> None:
