@@ -2395,6 +2395,7 @@ def home() -> str:
               return Boolean(ws.post || (ws.image && ws.image.image_url) || ws.execution_plan);
             }
             if (stage === "strategy_brief" && !ws.strategy) return false;
+            if (stage === "followed_feed" || stage === "engagement_review") return true;
             return hasDeliverable;
           }
 
@@ -3626,6 +3627,8 @@ def home() -> str:
               || redirectHtml.trim()
             );
             const showPanel = hasWorkflowContent
+              || mode === "followed_feed"
+              || mode === "engagement_review"
               || (mode !== "idle" && mode !== "planning" && mode !== "strategy_brief");
             if (!showPanel) {
               result.innerHTML = "";

@@ -124,6 +124,27 @@ _PLATFORM_OPERATION_MARKERS = (
     "linkedin.com",
 )
 
+_FOLLOWED_ENGAGEMENT_MARKERS = (
+    "perfis para seguir",
+    "perfil para seguir",
+    "perfis a seguir",
+    "perfis que sigo",
+    "quem seguir",
+    "seguir perfis",
+    "comentar publicac",
+    "comentar posts",
+    "comentarios em public",
+    "comentarios nas public",
+    "comentarios nos posts",
+    "comentar nas public",
+    "engagement em public",
+    "feed de perfis",
+    "publicacoes de perfis",
+    "publicacoes desses perfis",
+    "importar feed",
+    "sugerir perfis",
+)
+
 _LINKEDIN_WORKFLOW_STAGES = frozenset({
     STAGE_STRATEGY_BRIEF,
     STAGE_STRATEGY_REVIEW,
@@ -399,6 +420,182 @@ def _should_enter_linkedin_strategy(
         workflow_channels=state.get("channels"),
         continue_linkedin_strategy=continuing,
     )
+
+
+def _is_followed_engagement_intent(normalized: str) -> bool:
+    """Deteta pedido de perfis a seguir ou comentários em publicações de terceiros.
+
+    Argumentos:
+        normalized: Última mensagem do utilizador normalizada.
+
+    Retorno:
+        ``True`` quando o utilizador quer o fluxo de engagement (Fase D).
+    """
+
+    if not normalized:
+        return False
+    if any(marker in normalized for marker in _FOLLOWED_ENGAGEMENT_MARKERS):
+        return True
+    if "perfil" in normalized and "seguir" in normalized:
+        return True
+    if "comentar" in normalized and ("public" in normalized or "post" in normalized):
+        return True
+    if "comentario" in normalized and (
+        "public" in normalized or "post" in normalized or "perfil" in normalized
+    ):
+        return True
+    return False
+
+
+def _wants_auto_suggest_followed_profiles(normalized: str) -> bool:
+    """Indica se o utilizador pede sugestões automáticas de perfis por ICP.
+
+    Argumentos:
+        normalized: Mensagem normalizada.
+
+    Retorno:
+        ``True`` para pedidos como «perfis para seguir» ou «sugerir perfis».
+    """
+
+    markers = (
+        "sugerir",
+        "sugest",
+        "quero perfis",
+        "perfis para",
+        "perfis a seguir",
+        "quem seguir",
+    )
+    if any(marker in normalized for marker in markers):
+        return True
+    return "perfil" in normalized and "seguir" in normalized
+
+
+def _handle_followed_engagement_chat_intent(
+    state: Dict[str, Any],
+    normalized: str,
+    client: OpenAI,
+    model: str,
+    language: str,
+) -> Dict[str, Any]:
+    """Abre o fluxo de perfis seguidos e comentários conforme o pedido no chat.
+
+    Argumentos:
+        state: Estado mutável do workflow.
+        normalized: Última mensagem do utilizador normalizada.
+        client: Cliente OpenAI.
+        model: Modelo LLM.
+        language: Idioma das mensagens.
+
+    Retorno:
+        Payload com estágio ``followed_feed`` e painel activo.
+    """
+
+    state["stage"] = STAGE_FOLLOWED_FEED
+    channels = list(state.get("channels") or [])
+    if "linkedin" not in [str(c).lower() for c in channels]:
+        channels.append("linkedin")
+    state["channels"] = channels
+    state["pending_actions"] = [
+        ACTION_SUGGEST_FOLLOWED_PROFILES,
+        ACTION_ADD_FOLLOWED_PROFILE,
+        ACTION_MERGE_FOLLOWED_POSTS,
+        ACTION_SELECT_FOLLOWED_POST,
+        ACTION_GENERATE_ENGAGEMENT,
+    ]
+
+    wants_suggest = _wants_auto_suggest_followed_profiles(normalized)
+    strategy_ok = strategy_has_core_content(state.get("strategy") or {})
+
+    if wants_suggest and strategy_ok and copywriter_agent.is_configured():
+        from agents.director_follow_suggestions import (
+            merge_suggestions_into_state,
+            suggest_followed_profiles_from_strategy,
+        )
+
+        existing_profiles = state.get("followed_profiles") or []
+        exclude = [str(p.get("profile_url") or "") for p in existing_profiles if isinstance(p, dict)]
+        try:
+            result = suggest_followed_profiles_from_strategy(
+                client,
+                model,
+                state,
+                language,
+                count=5,
+                exclude_urls=exclude,
+            )
+            if result.get("success"):
+                new_suggestions = (
+                    result.get("suggestions") if isinstance(result.get("suggestions"), list) else []
+                )
+                state["followed_profile_suggestions"] = merge_suggestions_into_state(
+                    state.get("followed_profile_suggestions") or [],
+                    new_suggestions,
+                )
+                reply = str(result.get("reply") or "").strip()
+                if not reply:
+                    reply = (
+                        "Sugeri perfis alinhados com a tua estratégia/ICP no painel. "
+                        "Confirma os que queres seguir; depois importa publicações e "
+                        "escolhe uma para eu propor um comentário."
+                    )
+                return {
+                    "reply": reply,
+                    "orchestration_mode": STAGE_FOLLOWED_FEED,
+                    "workflow_state": state,
+                    "deliverables": _deliverables_from_state(state),
+                    "pending_actions": state["pending_actions"],
+                    "agents_involved": [],
+                }
+        except Exception:  # noqa: BLE001
+            pass
+
+    profiles = state.get("followed_profiles") or []
+    queue = state.get("followed_posts_queue") or []
+    pending_posts = [
+        p for p in queue if isinstance(p, dict) and (p.get("status") or "pending") == "pending"
+    ]
+
+    if "comentar" in normalized or "comentario" in normalized:
+        if pending_posts:
+            reply = (
+                "Tens publicações na fila. Escolhe uma no painel **Comentar publicações** "
+                "e clica «Sugerir comentário» — ou diz qual perfil te interessa."
+            )
+        elif profiles:
+            reply = (
+                "Já tens perfis na lista. Clica **Actualizar publicações** no painel "
+                "para recolher posts e depois escolhe um para comentar."
+            )
+        else:
+            reply = (
+                "Para comentar publicações de terceiros: adiciona perfis "
+                "(sugestão por ICP ou URL manual), importa o feed e escolhe um post."
+            )
+    elif wants_suggest and not strategy_ok:
+        reply = (
+            "Para sugerir perfis por ICP preciso de uma estratégia com objetivos e ICP — "
+            "ou cola URLs LinkedIn manualmente no painel «Comentar publicações de perfis que sigo»."
+        )
+    elif profiles or state.get("followed_profile_suggestions"):
+        reply = (
+            "Abri o painel de **perfis e comentários**. Confirma sugestões, actualiza "
+            "publicações e escolhe um post para eu propor comentário."
+        )
+    else:
+        reply = (
+            "Vamos aos **perfis para seguir e comentários**. No painel abaixo usa "
+            "«Sugerir perfis (ICP)», «+ URL manual» ou «Importar feed». Depois escolhes "
+            "uma publicação para eu sugerir comentário."
+        )
+
+    return {
+        "reply": reply,
+        "orchestration_mode": STAGE_FOLLOWED_FEED,
+        "workflow_state": state,
+        "deliverables": _deliverables_from_state(state),
+        "pending_actions": state["pending_actions"],
+        "agents_involved": [],
+    }
 
 
 def _is_design_only_request(normalized: str) -> bool:
@@ -1245,6 +1442,19 @@ def process_director_turn(
         "pending_actions": state.get("pending_actions") or [],
     }
 
+    if last_user_text and not user_action and not inferred:
+        normalized_intent = normalize_text(last_user_text)
+        if _is_followed_engagement_intent(normalized_intent):
+            engagement_result = _handle_followed_engagement_chat_intent(
+                state=state,
+                normalized=normalized_intent,
+                client=client,
+                model=openai_model,
+                language=language,
+            )
+            base_response.update(engagement_result)
+            return base_response
+
     # --- Estratégia LinkedIn ---
     if action == ACTION_APPROVE_STRATEGY and state["stage"] == STAGE_STRATEGY_REVIEW:
         state["stage"] = STAGE_STRATEGY_APPROVED
@@ -1322,7 +1532,19 @@ def process_director_turn(
 
     if state["stage"] == STAGE_STRATEGY_APPROVED and last_user_text and not user_action:
         normalized_approved = normalize_text(last_user_text)
-        if _is_copy_or_design_request(normalized_approved) or "post" in normalized_approved:
+        if _is_followed_engagement_intent(normalized_approved):
+            engagement_result = _handle_followed_engagement_chat_intent(
+                state=state,
+                normalized=normalized_approved,
+                client=client,
+                model=openai_model,
+                language=language,
+            )
+            base_response.update(engagement_result)
+            return base_response
+        if _is_copy_or_design_request(normalized_approved) or (
+            "post" in normalized_approved and "seguir" not in normalized_approved
+        ):
             try:
                 result = _start_execution_from_strategy(
                     state=state,
