@@ -49,6 +49,7 @@ from agents.director_strategy import (
     sanitize_strategy_chat_reply,
     strategy_brief_for_execution,
     strategy_has_core_content,
+    text_mentions_linkedin,
 )
 from agents.director_team import (
     build_conversation_brief,
@@ -113,21 +114,26 @@ _PLATFORM_OPERATION_MARKERS = (
     "auditar",
     "auditoria",
     "publicar",
-    "publicacao",
     "calendario",
     "oauth",
     "login",
     "ligar",
     "conectar",
-    "perfil",
     "metricas",
-    "indicadores",
-    "seguidores",
-    "engagement",
-    "conta",
     "harvest",
     "linkedin.com",
 )
+
+_LINKEDIN_WORKFLOW_STAGES = frozenset({
+    STAGE_STRATEGY_BRIEF,
+    STAGE_STRATEGY_REVIEW,
+    STAGE_STRATEGY_APPROVED,
+    STAGE_POSTS_REVIEW,
+    STAGE_OPTIMIZATION_REVIEW,
+    STAGE_PUBLISH_CONFIRM,
+    STAGE_FOLLOWED_FEED,
+    STAGE_ENGAGEMENT_REVIEW,
+})
 
 _INSTAGRAM_MARKERS = (
     "instagram",
@@ -168,6 +174,7 @@ def _new_workflow_state() -> Dict[str, Any]:
         "engagement_draft": None,
         "engagement_log": [],
         "pending_actions": [],
+        "standalone_image": False,
     }
 
 
@@ -236,6 +243,7 @@ def normalize_workflow_state(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     state["engagement_log"] = log if isinstance(log, list) else []
     actions = raw.get("pending_actions")
     state["pending_actions"] = actions if isinstance(actions, list) else []
+    state["standalone_image"] = bool(raw.get("standalone_image"))
     return state
 
 
@@ -298,12 +306,24 @@ def _copy_summary_for_ui(copy_payload: Dict[str, Any], post: Dict[str, Any]) -> 
     return "\n".join(lines).strip()
 
 
-def _channels_from_assignments(assignments: Sequence[Dict[str, str]], conversation: str) -> List[str]:
-    """Infere canal alvo a partir do brief (sem mobilizar agentes de rede)."""
+def _channels_from_assignments(
+    assignments: Sequence[Dict[str, str]],
+    last_user_text: str,
+) -> List[str]:
+    """Infere canal alvo só a partir do pedido actual do utilizador.
 
-    normalized = conversation.lower()
+    Argumentos:
+        assignments: Tarefas planeadas (reservado para extensão futura).
+        last_user_text: Última mensagem do utilizador (não o histórico completo).
+
+    Retorno:
+        Lista de canais (``geral`` quando não há rede explícita).
+    """
+
+    _ = assignments
+    normalized = normalize_text(last_user_text) if last_user_text else ""
     channels: List[str] = []
-    if "linkedin" in normalized:
+    if text_mentions_linkedin(normalized):
         channels.append("linkedin")
     if any(m in normalized for m in ("instagram", "insta", "meta", "facebook", "reels")):
         channels.append("meta")
@@ -327,10 +347,259 @@ def _is_copy_or_design_request(normalized: str) -> bool:
         "anuncio",
         "publicidade",
         "slogan",
+        "publicacao",
+        "publicação",
     )
     has_creative = any(marker in normalized for marker in creative_markers)
-    has_platform_ops = any(marker in normalized for marker in _PLATFORM_OPERATION_MARKERS)
-    return has_creative and not has_platform_ops
+    if not has_creative:
+        return False
+    if text_mentions_linkedin(normalized) or any(m in normalized for m in _INSTAGRAM_MARKERS):
+        has_platform_ops = any(marker in normalized for marker in _PLATFORM_OPERATION_MARKERS)
+        return not has_platform_ops
+    return True
+
+
+def _in_linkedin_workflow(state: Dict[str, Any]) -> bool:
+    """Indica se o utilizador está num fluxo LinkedIn activo (não só login ligado).
+
+    Argumentos:
+        state: Estado do workflow do Diretor.
+
+    Retorno:
+        ``True`` em etapas de estratégia, calendário ou publicação LinkedIn.
+    """
+
+    stage = str(state.get("stage") or STAGE_IDLE)
+    if stage in _LINKEDIN_WORKFLOW_STAGES:
+        return True
+    channels = state.get("channels") if isinstance(state.get("channels"), list) else []
+    if "linkedin" in [str(c).lower() for c in channels]:
+        return bool(state.get("linkedin_calendar") or state.get("strategy"))
+    return False
+
+
+def _should_enter_linkedin_strategy(
+    state: Dict[str, Any],
+    last_user_text: str,
+) -> bool:
+    """Decide se o pedido deve entrar na estratégia LinkedIn.
+
+    Argumentos:
+        state: Estado actual do workflow.
+        last_user_text: Última mensagem do utilizador.
+
+    Retorno:
+        ``True`` apenas com LinkedIn explícito ou continuação de brief/revisão.
+    """
+
+    stage = str(state.get("stage") or STAGE_IDLE)
+    continuing = stage in {STAGE_STRATEGY_BRIEF, STAGE_STRATEGY_REVIEW}
+    return is_linkedin_strategy_intent(
+        last_user_text,
+        workflow_channels=state.get("channels"),
+        continue_linkedin_strategy=continuing,
+    )
+
+
+def _is_design_only_request(normalized: str) -> bool:
+    """Deteta pedido de imagem/criativo genérico (sem canal LinkedIn/Instagram).
+
+    Argumentos:
+        normalized: Última mensagem normalizada.
+
+    Retorno:
+        ``True`` para pedidos como «criar uma imagem para uma publicação».
+    """
+
+    if text_mentions_linkedin(normalized):
+        return False
+    if any(m in normalized for m in _INSTAGRAM_MARKERS):
+        return False
+    image_markers = (
+        "imagem",
+        "criativo",
+        "visual",
+        "design",
+        "ilustracao",
+        "ilustração",
+        "foto",
+        "banner",
+        "mockup",
+    )
+    return any(marker in normalized for marker in image_markers)
+
+
+def _is_copy_only_request(normalized: str) -> bool:
+    """Deteta pedido de copy/texto genérico (sem canal LinkedIn/Instagram).
+
+    Argumentos:
+        normalized: Última mensagem normalizada.
+
+    Retorno:
+        ``True`` para pedidos como «texto para uma publicação» sem rede explícita.
+    """
+
+    if text_mentions_linkedin(normalized):
+        return False
+    if any(m in normalized for m in _INSTAGRAM_MARKERS):
+        return False
+    if _is_design_only_request(normalized):
+        return False
+    copy_markers = (
+        "copy",
+        "texto",
+        "legenda",
+        "headline",
+        "slogan",
+        "publicacao",
+        "publicação",
+        "caption",
+        "gancho",
+        "cta",
+    )
+    return any(marker in normalized for marker in copy_markers)
+
+
+def _handle_standalone_copy_request(
+    state: Dict[str, Any],
+    sanitized: Sequence[Dict[str, str]],
+    language: str,
+    *,
+    agent_page_url: Callable[[str], str],
+) -> Dict[str, Any]:
+    """Gera copy via Copywriter sem assumir LinkedIn nem calendário.
+
+    Argumentos:
+        state: Estado mutável do workflow.
+        sanitized: Histórico da conversa.
+        language: Idioma da copy.
+        agent_page_url: Resolver URL dos agentes para ``team_tasks``.
+
+    Retorno:
+        Payload parcial com copy em ``deliverables`` e estágio ``copy_review``.
+    """
+
+    conversation = build_conversation_brief(sanitized)
+    try:
+        copy_result = _generate_campaign_copy(
+            conversation,
+            "Gerar copy de marketing conforme o pedido do utilizador (canal genérico, sem LinkedIn).",
+            language,
+        )
+        post = post_from_copywriter(copy_result, channel="geral")
+        state["copy"] = copy_result
+        state["post"] = post
+        state["image"] = None
+        state["standalone_image"] = False
+        state["channels"] = ["geral"]
+        state["stage"] = STAGE_COPY_REVIEW
+        state["pending_actions"] = [ACTION_APPROVE_COPY, ACTION_EDIT_COPY]
+        summary = _copy_summary_for_ui(copy_result, post)
+        return {
+            "reply": (
+                "Tratei isto como copy geral — **não** assumi LinkedIn. "
+                "Revê o texto no painel; aprova ou edita antes de pedires imagem."
+            ),
+            "orchestration_mode": STAGE_COPY_REVIEW,
+            "workflow_state": state,
+            "deliverables": _deliverables_from_state(state),
+            "pending_actions": state["pending_actions"],
+            "team_tasks": [
+                build_team_task_payload(
+                    {
+                        "agent_name": "Agente Copywriter",
+                        "status": "completed",
+                        "summary": summary[:1500],
+                        "error": None,
+                    },
+                    agent_page_url,
+                )
+            ],
+            "agents_involved": ["Agente Copywriter"],
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "reply": f"Não consegui gerar a copy agora: {exc!s}",
+            "orchestration_mode": STAGE_PLANNING,
+            "workflow_state": state,
+            "deliverables": _deliverables_from_state(state),
+            "pending_actions": [],
+        }
+
+
+def _handle_standalone_design_request(
+    state: Dict[str, Any],
+    sanitized: Sequence[Dict[str, str]],
+    language: str,
+    *,
+    agent_page_url: Callable[[str], str],
+) -> Dict[str, Any]:
+    """Gera imagem via Designer sem assumir LinkedIn nem post de calendário.
+
+    Argumentos:
+        state: Estado mutável do workflow.
+        sanitized: Histórico da conversa.
+        language: Idioma (reservado para mensagens futuras).
+        agent_page_url: Resolver URL dos agentes para ``team_tasks``.
+
+    Retorno:
+        Payload parcial com imagem em ``deliverables`` e estágio ``image_review``.
+    """
+
+    _ = language
+    if not designer_agent.is_configured():
+        return {
+            "reply": (
+                "Para gerar imagens aqui, configura NANO_BANANA ou OPENAI_IMAGE no servidor. "
+                "O pedido não foi associado ao LinkedIn."
+            ),
+            "orchestration_mode": STAGE_PLANNING,
+            "workflow_state": state,
+            "deliverables": _deliverables_from_state(state),
+            "pending_actions": [],
+        }
+
+    try:
+        image_result = designer_agent.generate_image_from_chat(
+            [dict(m) for m in sanitized if isinstance(m, dict)],
+        )
+        state["image"] = image_result
+        state["post"] = None
+        state["copy"] = None
+        state["standalone_image"] = True
+        state["channels"] = ["geral"]
+        state["stage"] = STAGE_IMAGE_REVIEW
+        state["pending_actions"] = [ACTION_APPROVE_IMAGE, ACTION_REGENERATE_IMAGE]
+        return {
+            "reply": (
+                "Tratei isto como criativo visual geral — **não** assumi LinkedIn. "
+                "Revê a imagem no painel; podes aprovar, regenerar ou pedir ajustes no chat."
+            ),
+            "orchestration_mode": STAGE_IMAGE_REVIEW,
+            "workflow_state": state,
+            "deliverables": _deliverables_from_state(state),
+            "pending_actions": state["pending_actions"],
+            "team_tasks": [
+                build_team_task_payload(
+                    {
+                        "agent_name": "Agente Designer",
+                        "status": "completed",
+                        "summary": f"Imagem: {image_result.get('image_url', '')}",
+                        "error": None,
+                    },
+                    agent_page_url,
+                )
+            ],
+            "agents_involved": ["Agente Designer"],
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "reply": f"Não consegui gerar a imagem agora: {exc!s}",
+            "orchestration_mode": STAGE_PLANNING,
+            "workflow_state": state,
+            "deliverables": _deliverables_from_state(state),
+            "pending_actions": [],
+        }
 
 
 def resolve_specialist_redirect(
@@ -375,7 +644,9 @@ def resolve_specialist_redirect(
         if not _is_copy_or_design_request(normalized):
             return INSTAGRAM_REDIRECT_AGENT
 
-    if "linkedin" in normalized and any(marker in normalized for marker in _PLATFORM_OPERATION_MARKERS):
+    if text_mentions_linkedin(normalized) and any(
+        marker in normalized for marker in _PLATFORM_OPERATION_MARKERS
+    ):
         return correct_linkedin_agent(raw_text, "Agente LinkedIn (perfil)")
 
     return None
@@ -1619,6 +1890,26 @@ def process_director_turn(
         STAGE_IMAGE_CONFIRM,
         STAGE_IMAGE_REVIEW,
     }:
+        if state.get("standalone_image"):
+            try:
+                instr = str(payload.get("edit_instructions") or "").strip() or None
+                msgs = [dict(m) for m in sanitized if isinstance(m, dict)]
+                if instr:
+                    msgs.append({"role": "user", "content": f"Ajustes à imagem: {instr}"})
+                image_result = designer_agent.generate_image_from_chat(msgs)
+                state["image"] = image_result
+                state["stage"] = STAGE_IMAGE_REVIEW
+                state["pending_actions"] = [ACTION_APPROVE_IMAGE, ACTION_REGENERATE_IMAGE]
+                base_response["reply"] = "Imagem actualizada. Revê no painel."
+                base_response["orchestration_mode"] = STAGE_IMAGE_REVIEW
+                base_response["workflow_state"] = state
+                base_response["deliverables"] = _deliverables_from_state(state)
+                base_response["pending_actions"] = state["pending_actions"]
+                return base_response
+            except Exception as exc:  # noqa: BLE001
+                base_response["reply"] = f"Não consegui regenerar a imagem: {exc!s}"
+                return base_response
+
         post = state.get("post") or {}
         if not str(post.get("body", "")).strip() or post.get("body") == "(sem texto)":
             base_response["reply"] = "Não há texto de post para gerar imagem. Aprova ou edita a copy primeiro."
@@ -1655,6 +1946,18 @@ def process_director_turn(
         return base_response
 
     if action == ACTION_APPROVE_IMAGE and state["stage"] == STAGE_IMAGE_REVIEW:
+        if state.get("standalone_image"):
+            state["standalone_image"] = False
+            state["stage"] = STAGE_COMPLETED
+            state["pending_actions"] = []
+            base_response["reply"] = (
+                "Imagem aprovada. Se quiseres outra versão, descreve o que mudar no chat."
+            )
+            base_response["orchestration_mode"] = STAGE_COMPLETED
+            base_response["workflow_state"] = state
+            base_response["deliverables"] = _deliverables_from_state(state)
+            return base_response
+
         _package_post_ready(state)
         if state.get("linkedin_calendar"):
             msg = _enter_publish_confirm(state)
@@ -1692,16 +1995,64 @@ def process_director_turn(
 
     # --- Novo pedido / campanha ---
     normalized_last = normalize_text(last_user_text) if last_user_text else ""
-    conversation_full = build_conversation_brief(sanitized)
-    strategy_intent = is_linkedin_strategy_intent(
-        f"{conversation_full}\n{last_user_text}",
-        workflow_channels=state.get("channels"),
+
+    if state["stage"] in {STAGE_IDLE, STAGE_PLANNING, STAGE_COMPLETED} and not _in_linkedin_workflow(
+        state
+    ):
+        if not text_mentions_linkedin(normalized_last):
+            state["channels"] = [c for c in (state.get("channels") or []) if str(c).lower() != "linkedin"]
+            if not state["channels"]:
+                state["channels"] = []
+
+    _early_non_linkedin_stages = {
+        STAGE_IDLE,
+        STAGE_PLANNING,
+        STAGE_COMPLETED,
+        STAGE_STRATEGY_BRIEF,
+        STAGE_STRATEGY_REVIEW,
+    }
+    _pivot_from_linkedin_brief = (
+        state["stage"] in {STAGE_STRATEGY_BRIEF, STAGE_STRATEGY_REVIEW}
+        and not text_mentions_linkedin(normalized_last)
     )
+    if _pivot_from_linkedin_brief:
+        state["strategy"] = None
+        state["channels"] = ["geral"]
+
+    if (
+        _is_design_only_request(normalized_last)
+        and not text_mentions_linkedin(normalized_last)
+        and state["stage"] in _early_non_linkedin_stages
+    ):
+        design_result = _handle_standalone_design_request(
+            state,
+            sanitized,
+            language,
+            agent_page_url=agent_page_url,
+        )
+        base_response.update(design_result)
+        return base_response
+
+    if (
+        _is_copy_only_request(normalized_last)
+        and not text_mentions_linkedin(normalized_last)
+        and state["stage"] in _early_non_linkedin_stages
+    ):
+        copy_result = _handle_standalone_copy_request(
+            state,
+            sanitized,
+            language,
+            agent_page_url=agent_page_url,
+        )
+        base_response.update(copy_result)
+        return base_response
+
+    strategy_intent = _should_enter_linkedin_strategy(state, last_user_text)
 
     if strategy_intent or (
         state.get("strategy")
         and state["stage"] in {STAGE_IDLE, STAGE_COMPLETED, STAGE_STRATEGY_BRIEF}
-        and "linkedin" in normalized_last
+        and text_mentions_linkedin(normalized_last)
     ):
         strategy_result = _generate_and_review_strategy(
             client=client,
@@ -1781,7 +2132,7 @@ def process_director_turn(
             copy_brief = str(item.get("task_brief", "")).strip() or copy_brief
             break
 
-    state["channels"] = _channels_from_assignments(assignments, conversation)
+    state["channels"] = _channels_from_assignments(assignments, last_user_text)
     state["execution_plan"] = execution_plan
     channel = state["channels"][0] if state["channels"] else "geral"
 

@@ -3303,11 +3303,34 @@ def home() -> str:
             );
           }
 
-          function renderFollowedFeedPanel(profiles, queue, suggestions, mode) {
+          function isDirectorLinkedinContext(mode, workflowState, deliverables) {
+            const linkedinModes = new Set([
+              "strategy_brief", "strategy_review", "strategy_approved",
+              "optimization_review", "posts_review", "publish_confirm",
+              "followed_feed", "engagement_review"
+            ]);
+            if (linkedinModes.has(mode)) return true;
+            const ws = workflowState || {};
+            const channels = (ws.channels || []).map((c) => String(c).toLowerCase());
+            if (channels.includes("linkedin")) return true;
+            const d = deliverables || {};
+            if (d.strategy) return true;
+            if (Array.isArray(d.linkedin_calendar) && d.linkedin_calendar.length) return true;
+            if (Array.isArray(ws.linkedin_calendar) && ws.linkedin_calendar.length) return true;
+            if (Array.isArray(d.followed_profiles) && d.followed_profiles.length) return true;
+            if (Array.isArray(d.followed_posts_queue) && d.followed_posts_queue.length) return true;
+            return false;
+          }
+
+          function renderFollowedFeedPanel(profiles, queue, suggestions, mode, linkedinContext) {
+            if (!linkedinContext) return "";
             const profs = Array.isArray(profiles) ? profiles : [];
             const posts = Array.isArray(queue) ? queue : [];
             const sugs = (Array.isArray(suggestions) ? suggestions : [])
               .filter((s) => (s.status || "pending") === "pending");
+            if (!profs.length && !posts.length && !sugs.length && mode !== "followed_feed" && mode !== "engagement_review") {
+              return "";
+            }
             const sugRows = sugs.map((s) => `
               <div class="cal-row" style="margin-bottom:6px">
                 <div>
@@ -3467,7 +3490,7 @@ def home() -> str:
               strategy_approved: "Estratégia fechada. Inicia a execução ou reanalisa para optimizar.",
               optimization_review: "Compara progresso com os objetivos. Aplica ou ignora os ajustes propostos.",
               posts_review: "Escolhe o próximo post no calendário para rever copy e imagem.",
-              planning: "Indica objetivo, público e tom para eu preparar copy e imagem.",
+              planning: "Indica objetivo, público e tom. LinkedIn só entra se o pedires explicitamente.",
               copy_review: calendar.length
                 ? "Revisa o post do dia: copy → imagem → próximo no calendário."
                 : "Passo 1 de 2: revê o texto, edita se precisares e clica em «Aprovar copy».",
@@ -3478,16 +3501,17 @@ def home() -> str:
               followed_feed: "Escolhe uma publicação para eu sugerir um comentário.",
               completed: "Semana ou post concluídos. Podes comentar em perfis que segues ou reanalisar.",
               redirect: "Este pedido é do agente especializado — continua na página dele.",
-              idle: "Começa por definir a tua estratégia LinkedIn ou pede copy/imagem."
+              idle: "Descreve o que queres (copy, imagem, campanha). Menciona LinkedIn só se for para essa rede."
             }[mode] || "";
 
-            let workflowHtml = renderProfilePanel(linkedinAnalysis)
-              + renderStrategyPanel(strategy, mode)
-              + renderOptimizationPanel(optimizationReport, mode)
-              + renderCalendarPanel(calendar, activePostId, mode)
-              + renderPublishPanel(post, mode)
-              + renderFollowedFeedPanel(followedProfiles, followedPostsQueue, followedSuggestions, mode)
-              + renderEngagementPanel(engagementDraft, mode);
+            const linkedinContext = isDirectorLinkedinContext(mode, workflowState, deliverables);
+            let workflowHtml = (linkedinContext ? renderProfilePanel(linkedinAnalysis) : "")
+              + (linkedinContext ? renderStrategyPanel(strategy, mode) : "")
+              + (linkedinContext ? renderOptimizationPanel(optimizationReport, mode) : "")
+              + (linkedinContext ? renderCalendarPanel(calendar, activePostId, mode) : "")
+              + (linkedinContext ? renderPublishPanel(post, mode) : "")
+              + renderFollowedFeedPanel(followedProfiles, followedPostsQueue, followedSuggestions, mode, linkedinContext)
+              + (linkedinContext ? renderEngagementPanel(engagementDraft, mode) : "");
             if (post && post.body && mode !== "engagement_review") {
               const readonly = mode !== "copy_review";
               const metaParts = [];

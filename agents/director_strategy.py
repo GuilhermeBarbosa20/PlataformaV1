@@ -107,10 +107,29 @@ def _normalize_for_match(text: str) -> str:
     return lowered
 
 
+def text_mentions_linkedin(text: str) -> bool:
+    """Indica se o texto menciona LinkedIn explicitamente.
+
+    Argumentos:
+        text: Mensagem ou brief do utilizador.
+
+    Retorno:
+        ``True`` quando há referência clara ao LinkedIn (não por login ligado).
+    """
+
+    normalized = _normalize_for_match(str(text or "").strip())
+    if not normalized:
+        return False
+    if any(marker in normalized for marker in LINKEDIN_MARKERS):
+        return True
+    return "linkedin.com" in normalized.replace(" ", "")
+
+
 def is_linkedin_strategy_intent(
     text: str,
     *,
     workflow_channels: Optional[List[str]] = None,
+    continue_linkedin_strategy: bool = False,
 ) -> bool:
     """Indica se o utilizador pede estratégia LinkedIn com objetivos próprios.
 
@@ -118,9 +137,15 @@ def is_linkedin_strategy_intent(
     autoridade, ranking, etc.). Esta função só deteta a *intenção* de planear
     no LinkedIn — o conteúdo concreto dos objetivos é tratado pelo LLM.
 
+    Não assume LinkedIn só porque o utilizador tem sessão ligada: é obrigatório
+    mencionar LinkedIn no pedido, excepto quando já está a responder perguntas
+    dentro do fluxo de estratégia LinkedIn (``continue_linkedin_strategy``).
+
     Argumentos:
         text: Última mensagem do utilizador (ou brief agregado).
         workflow_channels: Canais já activos no fluxo (ex.: ``linkedin``).
+        continue_linkedin_strategy: ``True`` quando o estágio actual já é brief
+            ou revisão de estratégia LinkedIn (respostas sem repetir a palavra).
 
     Retorno:
         ``True`` quando o pedido deve entrar no fluxo de estratégia do Diretor.
@@ -130,10 +155,10 @@ def is_linkedin_strategy_intent(
     if not normalized:
         return False
 
-    channels = [str(c).strip().lower() for c in (workflow_channels or [])]
-    in_linkedin_flow = "linkedin" in channels
+    has_linkedin = text_mentions_linkedin(normalized)
+    if not has_linkedin and not continue_linkedin_strategy:
+        return False
 
-    has_linkedin = any(marker in normalized for marker in LINKEDIN_MARKERS)
     has_strategy = any(marker in normalized for marker in STRATEGY_MARKERS)
     has_goal = any(marker in normalized for marker in LINKEDIN_GOAL_VERBS)
 
@@ -144,7 +169,7 @@ def is_linkedin_strategy_intent(
 
     if has_linkedin and (has_strategy or has_goal or has_numeric_target):
         return True
-    if in_linkedin_flow and (has_goal or has_strategy or has_numeric_target):
+    if continue_linkedin_strategy and (has_goal or has_strategy or has_numeric_target):
         return True
     if has_linkedin and has_deadline:
         return True
