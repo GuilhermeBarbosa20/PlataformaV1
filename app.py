@@ -757,6 +757,10 @@ class LinkedInPublishPostRequest(BaseModel):
         None,
         description="Token OAuth com w_member_social (fluxo connect-publish), não o OIDC Supabase.",
     )
+    linkedin_person_urn: Optional[str] = Field(
+        None,
+        description="URN do membro LinkedIn (sessionStorage após connect-publish).",
+    )
     linkedin_id_token: Optional[str] = Field(None)
     post: Dict[str, Any] = Field(default_factory=dict)
     include_image: bool = False
@@ -2454,7 +2458,9 @@ def home() -> str:
               if (stored) workflowState.linkedin_profile_url = stored;
               if (hint) hint.textContent = stored ? `Perfil guardado: ${stored}` : "Ligado — clica em «Analisar perfil» para métricas reais.";
               if (directorLinkedinSession) {
-                void syncDirectorPublishAuthFromServer(directorLinkedinSession);
+                void syncDirectorPublishAuthFromServer(directorLinkedinSession).then((ok) => {
+                  directorPublishAuthorizedServer = ok || !!getDirectorPublishToken();
+                });
               }
             } else if (hint) {
               hint.textContent = "";
@@ -2668,6 +2674,29 @@ def home() -> str:
             return directorPublishAuthorizedServer || !!getDirectorPublishToken();
           }
 
+          async function ensureDirectorLinkedinSessionFresh() {
+            const sb = await getDirectorSupabaseClient();
+            if (!sb) return directorLinkedinSession;
+            try {
+              const { data: refreshed } = await sb.auth.refreshSession();
+              if (refreshed && refreshed.session) {
+                directorLinkedinSession = refreshed.session;
+                return refreshed.session;
+              }
+            } catch (e) {}
+            const { data } = await sb.auth.getSession();
+            directorLinkedinSession = (data && data.session) || directorLinkedinSession;
+            return directorLinkedinSession;
+          }
+
+          function getDirectorPublishPersonUrn() {
+            try {
+              return sessionStorage.getItem("plataforma_linkedin_publish_person_urn") || "";
+            } catch (e) {
+              return "";
+            }
+          }
+
           async function syncDirectorPublishAuthFromServer(session) {
             if (!session || !session.access_token) return false;
             try {
@@ -2753,7 +2782,8 @@ def home() -> str:
               alert("Este post não tem imagem aprovada.");
               return;
             }
-            if (!directorLinkedinSession) {
+            await ensureDirectorLinkedinSessionFresh();
+            if (!directorLinkedinSession || !directorLinkedinSession.access_token) {
               alert("Liga o LinkedIn primeiro.");
               return;
             }
@@ -2766,11 +2796,16 @@ def home() -> str:
               alert("Clica primeiro em «Autorizar publicação LinkedIn».");
               return;
             }
+            if (publishTok) {
+              await persistDirectorPublishAuthToServer(directorLinkedinSession);
+            }
+            const personUrn = getDirectorPublishPersonUrn();
             const modeLabel = includeImage ? "texto + imagem" : "só texto";
             if (!confirm(`Publicar no LinkedIn (${modeLabel})?\n\nSerá usada a tua conta ligada.`)) return;
             const payload = {
               supabase_access_token: directorLinkedinSession.access_token,
               linkedin_publish_access_token: publishTok || undefined,
+              linkedin_person_urn: personUrn || undefined,
               include_image: !!includeImage,
               post: buildDirectorPublishPostPayload(post, includeImage),
               visibility: "PUBLIC",
@@ -2803,9 +2838,22 @@ def home() -> str:
             if (q.get("publish_error") === "1") {
               addMessage("assistant", "A autorização de publicação LinkedIn falhou. Tenta outra vez.");
             }
-            if (q.get("publish_connected") === "1" && directorLinkedinSession) {
-              await persistDirectorPublishAuthToServer(directorLinkedinSession);
-              addMessage("assistant", "Publicação no LinkedIn autorizada. Já podes publicar o post no painel.");
+            if (q.get("publish_connected") === "1") {
+              if (!directorLinkedinSession) {
+                await refreshDirectorLinkedinAuth();
+              }
+              if (directorLinkedinSession) {
+                const stored = await persistDirectorPublishAuthToServer(directorLinkedinSession);
+                directorPublishAuthorizedServer = stored || !!getDirectorPublishToken();
+                addMessage(
+                  "assistant",
+                  stored
+                    ? "Publicação no LinkedIn autorizada e guardada. Já podes publicar o post no painel."
+                    : "Token de publicação recebido, mas não foi guardado no servidor. Tenta «Autorizar publicação LinkedIn» outra vez ou confirma a migration 004 no Supabase."
+                );
+              } else {
+                addMessage("assistant", "Publicação autorizada no browser, mas a sessão LinkedIn não está activa. Liga o LinkedIn e autoriza outra vez.");
+              }
             }
             q.delete("publish_connected");
             q.delete("publish_error");
@@ -4668,6 +4716,14 @@ def linkedin_publish_post(payload: LinkedInPublishPostRequest) -> Dict[str, Any]
         )
     access_token_for_api = publish_tok
 
+    person_urn = ""
+    if oauth_row:
+        person_urn = str(oauth_row.get("linkedin_person_urn") or "").strip()
+    if not person_urn:
+        person_urn = str(payload.linkedin_person_urn or "").strip()
+    if not person_urn:
+        person_urn = get_linkedin_person_urn(access_token_for_api) or ""
+
     post = payload.post if isinstance(payload.post, dict) else {}
     post_id = str(post.get("id") or "").strip()
     if not post_id:
@@ -4685,11 +4741,13 @@ def linkedin_publish_post(payload: LinkedInPublishPostRequest) -> Dict[str, Any]
                 detail="Não há imagem aprovada para publicar. Gera e aprova a imagem primeiro.",
             )
 
-    person_urn = get_linkedin_person_urn(access_token_for_api)
     if not person_urn:
         raise HTTPException(
             status_code=401,
-            detail="Não foi possível obter o perfil LinkedIn. Autoriza publicação outra vez.",
+            detail=(
+                "Não foi possível obter o URN do perfil LinkedIn. "
+                "Clica outra vez em «Autorizar publicação LinkedIn»."
+            ),
         )
 
     vis = payload.visibility.strip().upper()
@@ -4704,10 +4762,9 @@ def linkedin_publish_post(payload: LinkedInPublishPostRequest) -> Dict[str, Any]
         visibility=vis,
     )
     if not result.get("success"):
-        raise HTTPException(
-            status_code=502,
-            detail=str(result.get("error") or "Falha ao publicar no LinkedIn."),
-        )
+        err = str(result.get("error") or "Falha ao publicar no LinkedIn.")
+        status_code = 401 if "LinkedIn API 401" in err or "LinkedIn API 403" in err else 502
+        raise HTTPException(status_code=status_code, detail=err)
     return {
         "success": True,
         "linkedin_post_urn": result.get("linkedin_post_urn"),

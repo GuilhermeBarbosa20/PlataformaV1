@@ -152,8 +152,9 @@ def upsert_user_linkedin_publish_oauth_to_database(
         "updated_at": now,
     }
     body = json.dumps(payload).encode("utf-8")
+    upsert_url = f"{base}/rest/v1/user_linkedin_publish_oauth?on_conflict=user_id"
     req = urllib.request.Request(
-        f"{base}/rest/v1/user_linkedin_publish_oauth",
+        upsert_url,
         data=body,
         headers={
             "Authorization": f"Bearer {token}",

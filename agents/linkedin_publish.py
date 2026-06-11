@@ -13,28 +13,60 @@ STATIC_GENERATED_DIR = BASE_DIR / "static" / "generated"
 LINKEDIN_API_BASE = "https://api.linkedin.com/v2"
 
 
-def get_linkedin_person_urn(access_token: str) -> Optional[str]:
-    """Obtém o URN da pessoa autenticada (`urn:li:person:...`) via `/v2/userinfo`.
+def normalize_linkedin_person_urn(raw: str) -> Optional[str]:
+    """Normaliza um ID ou URN LinkedIn para ``urn:li:person:...``.
 
     Argumentos:
-        access_token: Token OAuth LinkedIn (``provider_token`` da sessão Supabase).
+        raw: ``sub`` do userinfo, ``id`` do ``/v2/me`` ou URN completo.
 
     Retorno:
-        URN no formato ``urn:li:person:{sub}`` ou ``None`` se a API falhar.
+        URN canónico ou ``None`` se vazio.
+    """
+
+    rid = str(raw or "").strip()
+    if not rid:
+        return None
+    if rid.startswith("urn:li:person:"):
+        return rid
+    return f"urn:li:person:{rid}"
+
+
+def get_linkedin_person_urn(access_token: str) -> Optional[str]:
+    """Obtém o URN da pessoa autenticada (`urn:li:person:...`).
+
+    Tenta ``/v2/userinfo`` (OpenID) e, se falhar, ``/v2/me`` com token
+    ``w_member_social``.
+
+    Argumentos:
+        access_token: Token OAuth LinkedIn com permissão de publicação.
+
+    Retorno:
+        URN no formato ``urn:li:person:{id}`` ou ``None`` se a API falhar.
     """
 
     token = str(access_token or "").strip()
     if not token:
         return None
+
     data = _linkedin_get_json(f"{LINKEDIN_API_BASE}/userinfo", token)
-    if not data:
-        return None
-    sub = str(data.get("sub") or "").strip()
-    if not sub:
-        return None
-    if sub.startswith("urn:li:person:"):
-        return sub
-    return f"urn:li:person:{sub}"
+    if isinstance(data, dict):
+        sub = str(data.get("sub") or "").strip()
+        urn = normalize_linkedin_person_urn(sub)
+        if urn:
+            return urn
+
+    status, _, raw = _linkedin_request(f"{LINKEDIN_API_BASE}/me", token, method="GET")
+    if status == 200:
+        try:
+            me = json.loads(raw.decode("utf-8"))
+        except json.JSONDecodeError:
+            me = None
+        if isinstance(me, dict) and me.get("id"):
+            urn = normalize_linkedin_person_urn(str(me.get("id")))
+            if urn:
+                return urn
+
+    return None
 
 
 def format_linkedin_post_text(post: Dict[str, Any]) -> str:
