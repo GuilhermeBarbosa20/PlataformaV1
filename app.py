@@ -2085,7 +2085,33 @@ def home() -> str:
           .li-btn-login { background: linear-gradient(180deg, #0a66c2, #004182); }
           .li-btn-analyze { background: linear-gradient(180deg, #10b981, #059669); }
           .li-btn-logout { background: linear-gradient(180deg, #64748b, #475569); }
+          .li-btn-optimize { background: linear-gradient(180deg, #a855f7, #7c3aed); }
           .linkedin-profile-hint { margin: 0 0 8px; font-size: 0.8rem; color: #94a3b8; min-height: 1.2em; }
+          .optimization-panel {
+            margin-top: 12px;
+            padding: 14px;
+            border: 1px solid rgba(168, 85, 247, 0.35);
+            border-radius: 12px;
+            background: rgba(49, 46, 129, 0.25);
+          }
+          .optimization-panel h4 { margin: 0 0 8px; color: #e9d5ff; }
+          .opt-status-badge {
+            display: inline-block;
+            font-size: 0.72rem;
+            padding: 4px 10px;
+            border-radius: 999px;
+            margin-bottom: 10px;
+            background: rgba(148, 163, 184, 0.25);
+            color: #e2e8f0;
+          }
+          .opt-status-badge.on_track { background: rgba(16, 185, 129, 0.25); color: #6ee7b7; }
+          .opt-status-badge.ahead { background: rgba(14, 165, 233, 0.25); color: #7dd3fc; }
+          .opt-status-badge.behind, .opt-status-badge.critical { background: rgba(239, 68, 68, 0.2); color: #fca5a5; }
+          .opt-table { width: 100%; font-size: 0.82rem; border-collapse: collapse; margin: 10px 0; }
+          .opt-table th, .opt-table td { text-align: left; padding: 6px 4px; border-bottom: 1px solid rgba(255,255,255,0.06); color: #cbd5e1; }
+          .opt-table th { color: #94a3b8; font-weight: 600; }
+          .opt-priority-alta { color: #fca5a5; }
+          .opt-priority-media { color: #fcd34d; }
           .calendar-panel {
             margin-top: 12px;
             padding: 14px;
@@ -2161,6 +2187,7 @@ def home() -> str:
               <div class="linkedin-auth-actions">
                 <button type="button" class="li-btn li-btn-login" id="btnDirectorLinkedinLogin" onclick="startDirectorLinkedinLogin()">Ligar LinkedIn</button>
                 <button type="button" class="li-btn li-btn-analyze" id="btnDirectorAnalyze" onclick="runDirectorLinkedinAnalysis()" disabled>Analisar perfil</button>
+                <button type="button" class="li-btn li-btn-optimize" id="btnDirectorOptimize" onclick="runDirectorReanalyzeAndOptimize()" disabled style="display:none">Reanalisar e otimizar</button>
                 <button type="button" class="li-btn li-btn-logout" id="btnDirectorLinkedinLogout" onclick="endDirectorLinkedinSession()" style="display:none">Terminar sessão</button>
               </div>
             </div>
@@ -2268,13 +2295,14 @@ def home() -> str:
             return t;
           }
 
-          function applyDirectorResponse(data) {
+          async function applyDirectorResponse(data) {
             if (data.workflow_state) {
               workflowState = data.workflow_state;
               saveWorkflowState();
             }
             addMessage("assistant", sanitizeChatReply(data.reply));
             renderDirectorPanel(data);
+            await refreshDirectorLinkedinAuth();
           }
 
           async function callDirector(payload) {
@@ -2337,6 +2365,7 @@ def home() -> str:
             const label = document.getElementById("linkedinAuthLabel");
             const loginBtn = document.getElementById("btnDirectorLinkedinLogin");
             const analyzeBtn = document.getElementById("btnDirectorAnalyze");
+            const optimizeBtn = document.getElementById("btnDirectorOptimize");
             const logoutBtn = document.getElementById("btnDirectorLinkedinLogout");
             const hint = document.getElementById("linkedinProfileHint");
             const sb = await getDirectorSupabaseClient();
@@ -2354,6 +2383,15 @@ def home() -> str:
             if (loginBtn) loginBtn.style.display = connected ? "none" : "";
             if (logoutBtn) logoutBtn.style.display = connected ? "" : "none";
             if (analyzeBtn) analyzeBtn.disabled = !connected;
+            const hasStrategy = workflowState && workflowState.strategy && (
+              (workflowState.strategy.smart_objectives && workflowState.strategy.smart_objectives.length)
+              || (workflowState.strategy.content_pillars && workflowState.strategy.content_pillars.length)
+              || workflowState.strategy.summary
+            );
+            if (optimizeBtn) {
+              optimizeBtn.style.display = connected && hasStrategy ? "" : "none";
+              optimizeBtn.disabled = !connected || !hasStrategy;
+            }
             if (connected) {
               const stored = localStorage.getItem(DIRECTOR_LINKEDIN_PROFILE_KEY) || "";
               if (stored) workflowState.linkedin_profile_url = stored;
@@ -2409,13 +2447,37 @@ def home() -> str:
             return payload;
           }
 
-          async function runDirectorLinkedinAnalysis() {
-            if (!directorLinkedinSession) {
-              alert("Liga o LinkedIn primeiro.");
-              return;
-            }
-            const hint = document.getElementById("linkedinProfileHint");
-            if (hint) hint.textContent = "A analisar perfil LinkedIn (Apify + IA)…";
+          function buildDirectorLinkedinSlim(data) {
+            const profile = data.public_profile_data || {};
+            const enrichment = profile.apify_enrichment || {};
+            return {
+              profile_url: data.profile_url,
+              linkedin_own_profile: true,
+              linkedin_page_kind: data.linkedin_page_kind,
+              metricas_linkedin: data.metricas_linkedin || data.metricas_instagram || {},
+              metricas_universais: data.metricas_universais || {},
+              principais_insights: (data.principais_insights || []).slice(0, 6),
+              problemas_identificados: (data.problemas_identificados || []).slice(0, 5),
+              oportunidades: (data.oportunidades || []).slice(0, 6),
+              acoes_prioritarias: (data.acoes_prioritarias || []).slice(0, 5),
+              ideias_conteudo: (data.ideias_conteudo || []).slice(0, 8),
+              plano_crescimento_curto_prazo: (data.plano_crescimento_curto_prazo || []).slice(0, 6),
+              posting_cadence: enrichment.posting_cadence || {},
+              content_type_distribution: enrichment.content_type_distribution || enrichment.format_distribution || {},
+              public_profile_data: {
+                profile_url: profile.profile_url || data.profile_url,
+                headline: profile.headline || enrichment.headline,
+                summary: profile.summary || enrichment.summary,
+                apify_enrichment: {
+                  content_type_distribution: enrichment.content_type_distribution || enrichment.format_distribution,
+                  posting_cadence: enrichment.posting_cadence,
+                  top_posts: (enrichment.top_posts || []).slice(0, 3),
+                },
+              },
+            };
+          }
+
+          async function fetchDirectorLinkedinAnalysis() {
             const payload = appendDirectorLinkedinSessionFields({
               profile_input: "",
               messages: [],
@@ -2423,55 +2485,39 @@ def home() -> str:
               platform: "linkedin",
               link_as_own_profile: true,
             });
+            const response = await fetch("/agents/social-media/profile-analyze", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload),
+            });
+            const data = await response.json();
+            if (!response.ok) {
+              const detail = data.detail || JSON.stringify(data);
+              throw new Error(detail);
+            }
+            return data;
+          }
+
+          async function runDirectorLinkedinAnalysis() {
+            if (!directorLinkedinSession) {
+              alert("Liga o LinkedIn primeiro.");
+              return;
+            }
+            const hint = document.getElementById("linkedinProfileHint");
+            if (hint) hint.textContent = "A analisar perfil LinkedIn (Apify + IA)…";
             try {
-              const response = await fetch("/agents/social-media/profile-analyze", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(payload),
-              });
-              const data = await response.json();
-              if (!response.ok) {
-                const detail = data.detail || JSON.stringify(data);
-                if (hint) hint.textContent = "";
-                addMessage("assistant", "Não consegui analisar o perfil. " + detail);
-                return;
-              }
+              const data = await fetchDirectorLinkedinAnalysis();
               if (!workflowState) workflowState = {};
               workflowState.linkedin_connected = true;
               workflowState.linkedin_profile_url = data.profile_url || "";
               if (data.profile_url) {
                 localStorage.setItem(DIRECTOR_LINKEDIN_PROFILE_KEY, data.profile_url);
               }
-              const profile = data.public_profile_data || {};
-              const enrichment = profile.apify_enrichment || {};
-              const slim = {
-                profile_url: data.profile_url,
-                linkedin_own_profile: true,
-                linkedin_page_kind: data.linkedin_page_kind,
-                metricas_linkedin: data.metricas_linkedin || data.metricas_instagram || {},
-                metricas_universais: data.metricas_universais || {},
-                principais_insights: (data.principais_insights || []).slice(0, 6),
-                problemas_identificados: (data.problemas_identificados || []).slice(0, 5),
-                oportunidades: (data.oportunidades || []).slice(0, 6),
-                acoes_prioritarias: (data.acoes_prioritarias || []).slice(0, 5),
-                ideias_conteudo: (data.ideias_conteudo || []).slice(0, 8),
-                plano_crescimento_curto_prazo: (data.plano_crescimento_curto_prazo || []).slice(0, 6),
-                posting_cadence: enrichment.posting_cadence || {},
-                content_type_distribution: enrichment.content_type_distribution || enrichment.format_distribution || {},
-                public_profile_data: {
-                  profile_url: profile.profile_url || data.profile_url,
-                  headline: profile.headline || enrichment.headline,
-                  summary: profile.summary || enrichment.summary,
-                  apify_enrichment: {
-                    content_type_distribution: enrichment.content_type_distribution || enrichment.format_distribution,
-                    posting_cadence: enrichment.posting_cadence,
-                    top_posts: (enrichment.top_posts || []).slice(0, 3),
-                  },
-                },
-              };
+              const slim = buildDirectorLinkedinSlim(data);
               workflowState.linkedin_analysis = slim;
               workflowState.channels = ["linkedin"];
               saveWorkflowState();
+              await refreshDirectorLinkedinAuth();
               if (hint) hint.textContent = data.profile_url
                 ? `Perfil analisado: ${data.profile_url}`
                 : "Perfil analisado.";
@@ -2489,13 +2535,56 @@ def home() -> str:
               });
             } catch (err) {
               if (hint) hint.textContent = "";
-              addMessage("assistant", "Falha na análise do perfil. Tenta novamente.");
+              const msg = err instanceof Error ? err.message : String(err);
+              addMessage("assistant", "Não consegui analisar o perfil. " + msg);
+            }
+          }
+
+          async function runDirectorReanalyzeAndOptimize() {
+            if (!directorLinkedinSession) {
+              alert("Liga o LinkedIn primeiro.");
+              return;
+            }
+            if (!workflowState || !workflowState.strategy) {
+              alert("Define e aprova uma estratégia antes de optimizar.");
+              return;
+            }
+            const hint = document.getElementById("linkedinProfileHint");
+            if (hint) hint.textContent = "A reanalisar perfil e comparar com a estratégia…";
+            const previousBaseline = workflowState.linkedin_analysis_baseline
+              || workflowState.linkedin_analysis;
+            if (workflowState.linkedin_analysis && !workflowState.linkedin_analysis_baseline) {
+              workflowState.linkedin_analysis_baseline = JSON.parse(
+                JSON.stringify(workflowState.linkedin_analysis)
+              );
+            }
+            try {
+              const data = await fetchDirectorLinkedinAnalysis();
+              const slim = buildDirectorLinkedinSlim(data);
+              if (!workflowState) workflowState = {};
+              workflowState.linkedin_analysis = slim;
+              if (previousBaseline && !workflowState.linkedin_analysis_baseline) {
+                workflowState.linkedin_analysis_baseline = previousBaseline;
+              }
+              workflowState.linkedin_profile_url = data.profile_url || workflowState.linkedin_profile_url || "";
+              saveWorkflowState();
+              if (hint) hint.textContent = "A gerar relatório de optimização…";
+              await directorAction("reanalyze_complete", {}, "Reanalisei o perfil LinkedIn.");
+              if (hint) hint.textContent = workflowState.linkedin_profile_url
+                ? `Reanálise: ${workflowState.linkedin_profile_url}`
+                : "Reanálise concluída.";
+              await refreshDirectorLinkedinAuth();
+            } catch (err) {
+              if (hint) hint.textContent = "";
+              const msg = err instanceof Error ? err.message : String(err);
+              addMessage("assistant", "Falha na reanálise. " + msg);
             }
           }
 
           window.startDirectorLinkedinLogin = startDirectorLinkedinLogin;
           window.endDirectorLinkedinSession = endDirectorLinkedinSession;
           window.runDirectorLinkedinAnalysis = runDirectorLinkedinAnalysis;
+          window.runDirectorReanalyzeAndOptimize = runDirectorReanalyzeAndOptimize;
 
           function buildPayload(extra = {}) {
             if (!workflowState) workflowState = {};
@@ -2629,6 +2718,74 @@ def home() -> str:
             return `<div class="calendar-panel"><h4>Calendário da semana</h4>${rows}</div>`;
           }
 
+          const OPT_STATUS_LABEL = {
+            on_track: "No caminho",
+            behind: "Atrasado",
+            ahead: "À frente",
+            critical: "Crítico",
+            insufficient_data: "Dados insuficientes",
+          };
+
+          function renderOptimizationPanel(report, mode) {
+            if (!report || (!report.headline && !report.insights && !report.objective_progress)) return "";
+            const status = report.overall_status || "insufficient_data";
+            const statusLabel = OPT_STATUS_LABEL[status] || status;
+            const exec = report.execution_summary || {};
+            const execHtml = exec.posts_total
+              ? `<p class="post-meta">Calendário: ${exec.posts_ready || 0}/${exec.posts_total} posts prontos (${exec.completion_pct || 0}%)</p>`
+              : "";
+            const objectives = report.objective_progress || [];
+            const objRows = objectives.map((o) => {
+              const st = OPT_STATUS_LABEL[o.status] || o.status || "";
+              return `<tr>
+                <td>${escapeHtml(o.metric || "")}</td>
+                <td>${escapeHtml(String(o.baseline || "—"))}</td>
+                <td>${escapeHtml(String(o.current || "—"))}</td>
+                <td>${escapeHtml(String(o.target || "—"))}</td>
+                <td>${escapeHtml(st)}</td>
+              </tr>`;
+            }).join("");
+            const objTable = objRows
+              ? `<table class="opt-table"><thead><tr><th>Métrica</th><th>Antes</th><th>Agora</th><th>Meta</th><th>Estado</th></tr></thead><tbody>${objRows}</tbody></table>`
+              : "";
+            const deltas = (report.metric_deltas || []).slice(0, 6).map((d) =>
+              `<li>${escapeHtml(d.metric || "")}: ${escapeHtml(String(d.before))} → ${escapeHtml(String(d.after))}</li>`
+            ).join("");
+            const deltaHtml = deltas ? `<ul class="strategy-list">${deltas}</ul>` : "";
+            const insights = (report.insights || []).map((i) => `<li>${escapeHtml(i)}</li>`).join("");
+            const insightsHtml = insights ? `<div class="strategy-section"><h5>Insights</h5><ul class="strategy-list">${insights}</ul></div>` : "";
+            const recs = (report.recommendations || []).map((r) => {
+              const pri = String(r.priority || "").toLowerCase();
+              const cls = pri === "alta" ? "opt-priority-alta" : pri === "media" ? "opt-priority-media" : "";
+              return `<li class="${cls}"><strong>${escapeHtml(r.area || "")}</strong>: ${escapeHtml(r.action || "")}</li>`;
+            }).join("");
+            const recHtml = recs ? `<div class="strategy-section"><h5>Recomendações</h5><ul class="strategy-list">${recs}</ul></div>` : "";
+            const adj = report.strategy_adjustments || {};
+            const adjSummary = adj.summary
+              ? `<div class="strategy-section"><h5>Ajustes propostos à estratégia</h5><p class="post-meta">${escapeHtml(adj.summary)}</p></div>`
+              : "";
+            let actionsHtml = "";
+            if (mode === "optimization_review") {
+              actionsHtml = `
+                <div class="workflow-actions">
+                  <button type="button" class="wf-btn wf-btn-approve" onclick="approveOptimization()">Aplicar optimizações</button>
+                  <button type="button" class="wf-btn wf-btn-secondary" onclick="dismissOptimization()">Manter estratégia actual</button>
+                </div>`;
+            }
+            return `
+              <div class="optimization-panel">
+                <h4>${escapeHtml(report.headline || "Optimização LinkedIn")}</h4>
+                <span class="opt-status-badge ${escapeHtml(status)}">${escapeHtml(statusLabel)}</span>
+                ${execHtml}
+                ${objTable}
+                ${deltaHtml ? `<div class="strategy-section"><h5>Variação de métricas</h5>${deltaHtml}</div>` : ""}
+                ${insightsHtml}
+                ${recHtml}
+                ${adjSummary}
+                ${actionsHtml}
+              </div>`;
+          }
+
           function renderProfilePanel(snapshot) {
             if (!snapshot || !snapshot.profile_url) return "";
             const metrics = snapshot.metricas_linkedin || {};
@@ -2658,11 +2815,14 @@ def home() -> str:
               || (workflowState && workflowState.linkedin_calendar) || [];
             const post = deliverables.post || (workflowState && workflowState.post) || null;
             const image = deliverables.image || (workflowState && workflowState.image) || null;
+            const optimizationReport = deliverables.optimization_report
+              || (workflowState && workflowState.optimization_report) || null;
             const activePostId = post && post.id ? post.id : null;
             const stageLabel = {
               strategy_brief: "Brief estratégico",
               strategy_review: "Revisão de estratégia",
               strategy_approved: "Estratégia aprovada",
+              optimization_review: "Análise e optimização",
               posts_review: "Calendário de posts",
               planning: "Planeamento",
               copy_review: "Revisão de copy",
@@ -2675,7 +2835,8 @@ def home() -> str:
             const stageHint = {
               strategy_brief: "Ainda faltam dados. Completa objetivos SMART, ICP e métricas no chat.",
               strategy_review: "Plano estratégico abaixo. Aprova ou pede ajustes antes dos posts.",
-              strategy_approved: "Estratégia fechada. Inicia a execução para gerar os posts da semana.",
+              strategy_approved: "Estratégia fechada. Inicia a execução ou reanalisa para optimizar.",
+              optimization_review: "Compara progresso com os objetivos. Aplica ou ignora os ajustes propostos.",
               posts_review: "Escolhe o próximo post no calendário para rever copy e imagem.",
               planning: "Indica objetivo, público e tom para eu preparar copy e imagem.",
               copy_review: calendar.length
@@ -2690,6 +2851,7 @@ def home() -> str:
 
             let workflowHtml = renderProfilePanel(linkedinAnalysis)
               + renderStrategyPanel(strategy, mode)
+              + renderOptimizationPanel(optimizationReport, mode)
               + renderCalendarPanel(calendar, activePostId);
             if (post && post.body) {
               const readonly = mode !== "copy_review";
@@ -2786,6 +2948,16 @@ def home() -> str:
             const instr = window.prompt("O que queres mudar neste post? (opcional)") || "";
             directorAction("regenerate_linkedin_post", { edit_instructions: instr }, "Refazer post LinkedIn.");
           };
+          window.approveOptimization = () => directorAction(
+            "approve_optimization",
+            {},
+            "Aplico as optimizações à estratégia."
+          );
+          window.dismissOptimization = () => directorAction(
+            "dismiss_optimization",
+            {},
+            "Manter a estratégia actual."
+          );
 
           async function sendMessage() {
             const content = chatInput.value.trim();
@@ -2809,7 +2981,7 @@ def home() -> str:
           (async function bootstrapDirectorPage() {
             await initDirectorSupabaseFromUrl();
             await refreshDirectorLinkedinAuth();
-            if (workflowState && (workflowState.strategy || workflowState.linkedin_analysis || workflowState.linkedin_calendar)) {
+            if (workflowState && (workflowState.strategy || workflowState.linkedin_analysis || workflowState.linkedin_calendar || workflowState.optimization_report)) {
               renderDirectorPanel({
                 orchestration_mode: workflowState.stage || "idle",
                 execution_plan: workflowState.execution_plan || "",
@@ -2817,6 +2989,7 @@ def home() -> str:
                   strategy: workflowState.strategy,
                   linkedin_analysis: workflowState.linkedin_analysis,
                   linkedin_calendar: workflowState.linkedin_calendar,
+                  optimization_report: workflowState.optimization_report,
                   post: workflowState.post,
                   image: workflowState.image,
                 },

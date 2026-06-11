@@ -7,6 +7,7 @@ LinkedIn (objetivos SMART, ICP, pilares) e depois delega copy e design.
 
 from __future__ import annotations
 
+import json
 import re
 import uuid
 from typing import Any, Callable, Dict, List, Optional, Sequence
@@ -20,6 +21,11 @@ from agents.director_linkedin import (
     generate_director_linkedin_posts,
     profile_context_markdown,
     regenerate_director_linkedin_post,
+)
+from agents.director_optimization import (
+    apply_optimization_to_strategy,
+    generate_optimization_report,
+    optimization_has_content,
 )
 from agents.director_strategy import (
     generate_linkedin_strategy,
@@ -40,6 +46,7 @@ STAGE_STRATEGY_BRIEF = "strategy_brief"
 STAGE_STRATEGY_REVIEW = "strategy_review"
 STAGE_STRATEGY_APPROVED = "strategy_approved"
 STAGE_POSTS_REVIEW = "posts_review"
+STAGE_OPTIMIZATION_REVIEW = "optimization_review"
 STAGE_PLANNING = "planning"
 STAGE_COPY_REVIEW = "copy_review"
 STAGE_IMAGE_CONFIRM = "image_confirm"
@@ -51,6 +58,9 @@ ACTION_START_EXECUTION = "start_execution"
 ACTION_ANALYZE_LINKEDIN = "analyze_linkedin_profile"
 ACTION_SELECT_POST = "select_post"
 ACTION_REGENERATE_LINKEDIN_POST = "regenerate_linkedin_post"
+ACTION_REANALYZE_COMPLETE = "reanalyze_complete"
+ACTION_APPROVE_OPTIMIZATION = "approve_optimization"
+ACTION_DISMISS_OPTIMIZATION = "dismiss_optimization"
 ACTION_APPROVE_COPY = "approve_copy"
 ACTION_EDIT_COPY = "edit_copy"
 ACTION_GENERATE_IMAGE = "generate_image"
@@ -110,6 +120,8 @@ def _new_workflow_state() -> Dict[str, Any]:
         "linkedin_connected": False,
         "linkedin_profile_url": "",
         "linkedin_analysis": None,
+        "linkedin_analysis_baseline": None,
+        "optimization_report": None,
         "linkedin_posts": [],
         "linkedin_calendar": [],
         "active_post_index": 0,
@@ -133,6 +145,7 @@ def normalize_workflow_state(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         STAGE_STRATEGY_REVIEW,
         STAGE_STRATEGY_APPROVED,
         STAGE_POSTS_REVIEW,
+        STAGE_OPTIMIZATION_REVIEW,
         STAGE_PLANNING,
         STAGE_COPY_REVIEW,
         STAGE_IMAGE_CONFIRM,
@@ -148,6 +161,10 @@ def normalize_workflow_state(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     state["linkedin_profile_url"] = str(raw.get("linkedin_profile_url") or "").strip()
     if isinstance(raw.get("linkedin_analysis"), dict):
         state["linkedin_analysis"] = raw["linkedin_analysis"]
+    if isinstance(raw.get("linkedin_analysis_baseline"), dict):
+        state["linkedin_analysis_baseline"] = raw["linkedin_analysis_baseline"]
+    if isinstance(raw.get("optimization_report"), dict):
+        state["optimization_report"] = raw["optimization_report"]
     posts = raw.get("linkedin_posts")
     state["linkedin_posts"] = posts if isinstance(posts, list) else []
     calendar = raw.get("linkedin_calendar")
@@ -413,6 +430,8 @@ def _deliverables_from_state(state: Dict[str, Any]) -> Dict[str, Any]:
         "linkedin_profile_url": state.get("linkedin_profile_url"),
         "linkedin_posts": state.get("linkedin_posts") or [],
         "linkedin_calendar": state.get("linkedin_calendar") or [],
+        "linkedin_analysis_baseline": state.get("linkedin_analysis_baseline"),
+        "optimization_report": state.get("optimization_report"),
         "active_post_index": state.get("active_post_index", 0),
         "post": state.get("post"),
         "copy": state.get("copy"),
@@ -783,6 +802,11 @@ def process_director_turn(
     if action == ACTION_APPROVE_STRATEGY and state["stage"] == STAGE_STRATEGY_REVIEW:
         state["stage"] = STAGE_STRATEGY_APPROVED
         state["pending_actions"] = [ACTION_START_EXECUTION]
+        baseline = state.get("linkedin_analysis")
+        if isinstance(baseline, dict):
+            state["linkedin_analysis_baseline"] = json.loads(
+                json.dumps(baseline, ensure_ascii=False)
+            )
         strategy = state.get("strategy") or {}
         base_response["reply"] = (
             "Estratégia aprovada. Clica em «Iniciar execução» para a equipa gerar "
@@ -880,6 +904,99 @@ def process_director_turn(
         )
         base_response["workflow_state"] = state
         base_response["pending_actions"] = state.get("pending_actions") or []
+        return base_response
+
+    # --- Ciclo análise → otimização (Fase C) ---
+    if action == ACTION_REANALYZE_COMPLETE:
+        if not strategy_has_core_content(state.get("strategy") or {}):
+            base_response["reply"] = (
+                "Preciso de uma estratégia aprovada antes de optimizar. "
+                "Define objetivos e aprova o plano primeiro."
+            )
+            return base_response
+        if not isinstance(state.get("linkedin_analysis"), dict):
+            base_response["reply"] = "Analisa o perfil LinkedIn antes de pedir optimização."
+            return base_response
+        try:
+            opt = generate_optimization_report(client, openai_model, state, language)
+            report = opt.get("report") if isinstance(opt.get("report"), dict) else {}
+            state["optimization_report"] = report
+            state["stage"] = STAGE_OPTIMIZATION_REVIEW
+            state["pending_actions"] = [
+                ACTION_APPROVE_OPTIMIZATION,
+                ACTION_DISMISS_OPTIMIZATION,
+            ]
+            reply = str(opt.get("reply") or "").strip()
+            if not reply:
+                reply = (
+                    "Comparei as métricas com a tua estratégia. "
+                    "Revê o relatório de optimização no painel."
+                )
+            base_response["reply"] = reply
+            base_response["orchestration_mode"] = STAGE_OPTIMIZATION_REVIEW
+            base_response["workflow_state"] = state
+            base_response["pending_actions"] = state["pending_actions"]
+            base_response["deliverables"] = _deliverables_from_state(state)
+        except Exception as exc:  # noqa: BLE001
+            base_response["reply"] = f"Não consegui gerar o relatório de optimização: {exc!s}"
+        return base_response
+
+    if action == ACTION_APPROVE_OPTIMIZATION and state["stage"] == STAGE_OPTIMIZATION_REVIEW:
+        report = state.get("optimization_report") or {}
+        if optimization_has_content(report):
+            state["strategy"] = apply_optimization_to_strategy(
+                state.get("strategy") or {},
+                report,
+                current_analysis=state.get("linkedin_analysis"),
+            )
+            state["execution_plan"] = state["strategy"].get("summary") or state.get("execution_plan", "")
+        state["optimization_report"] = None
+        state["stage"] = STAGE_STRATEGY_REVIEW
+        state["pending_actions"] = [ACTION_APPROVE_STRATEGY, ACTION_START_EXECUTION]
+        base_response["reply"] = (
+            "Apliquei as optimizações à estratégia. Revê o plano actualizado no painel — "
+            "aprova de novo ou inicia execução para gerar posts alinhados."
+        )
+        base_response["orchestration_mode"] = STAGE_STRATEGY_REVIEW
+        base_response["workflow_state"] = state
+        base_response["pending_actions"] = state["pending_actions"]
+        base_response["deliverables"] = _deliverables_from_state(state)
+        base_response["execution_plan"] = state.get("execution_plan", "")
+        return base_response
+
+    if action == ACTION_DISMISS_OPTIMIZATION and state["stage"] == STAGE_OPTIMIZATION_REVIEW:
+        state["optimization_report"] = None
+        if state.get("linkedin_calendar"):
+            state["stage"] = STAGE_POSTS_REVIEW
+            state["pending_actions"] = [ACTION_SELECT_POST]
+            msg = "Mantive a estratégia actual. Continua no calendário quando quiseres."
+        elif strategy_has_core_content(state.get("strategy") or {}):
+            state["stage"] = STAGE_STRATEGY_APPROVED
+            state["pending_actions"] = [ACTION_START_EXECUTION]
+            msg = "Mantive a estratégia actual. Podes iniciar execução ou reanalisar mais tarde."
+        else:
+            state["stage"] = STAGE_IDLE
+            state["pending_actions"] = []
+            msg = "Relatório dispensado."
+        base_response["reply"] = msg
+        base_response["orchestration_mode"] = state["stage"]
+        base_response["workflow_state"] = state
+        base_response["pending_actions"] = state.get("pending_actions") or []
+        base_response["deliverables"] = _deliverables_from_state(state)
+        return base_response
+
+    if state["stage"] == STAGE_OPTIMIZATION_REVIEW and not user_action:
+        base_response["reply"] = (
+            "Revê o relatório de optimização no painel. "
+            "Aplica os ajustes à estratégia ou mantém o plano actual."
+        )
+        base_response["orchestration_mode"] = STAGE_OPTIMIZATION_REVIEW
+        base_response["workflow_state"] = state
+        base_response["pending_actions"] = [
+            ACTION_APPROVE_OPTIMIZATION,
+            ACTION_DISMISS_OPTIMIZATION,
+        ]
+        base_response["deliverables"] = _deliverables_from_state(state)
         return base_response
 
     # --- Calendário / posts LinkedIn ---
