@@ -2095,6 +2095,7 @@ def home() -> str:
             border-radius: 12px;
             background: rgba(15, 23, 42, 0.55);
           }
+          .director-linkedin-hidden { display: none !important; }
           .linkedin-auth-status { display: flex; align-items: center; gap: 8px; font-size: 0.86rem; color: #cbd5e1; }
           .auth-dot {
             width: 9px;
@@ -2306,11 +2307,11 @@ def home() -> str:
               </div>
               <div>
                 <h1 class="title">Diretor de Marketing · Chatroom</h1>
-                <p class="subtitle">Define os teus objetivos — eu monto a estratégia LinkedIn. Falas só comigo; a equipa executa internamente.</p>
+                <p class="subtitle">Falas só comigo — eu coordeno copy, design e canais conforme o que pedires.</p>
               </div>
             </div>
 
-            <div id="linkedinAuthBar" class="linkedin-auth-bar">
+            <div id="linkedinAuthBar" class="linkedin-auth-bar director-linkedin-hidden">
               <div class="linkedin-auth-status">
                 <span id="linkedinAuthDot" class="auth-dot"></span>
                 <span id="linkedinAuthLabel">LinkedIn: não ligado</span>
@@ -2322,7 +2323,7 @@ def home() -> str:
                 <button type="button" class="li-btn li-btn-logout" id="btnDirectorLinkedinLogout" onclick="endDirectorLinkedinSession()" style="display:none">Terminar sessão</button>
               </div>
             </div>
-            <p id="linkedinProfileHint" class="linkedin-profile-hint"></p>
+            <p id="linkedinProfileHint" class="linkedin-profile-hint director-linkedin-hidden"></p>
 
             <div id="chatLog" class="chat-log"></div>
             <div class="controls">
@@ -2333,7 +2334,7 @@ def home() -> str:
               <button type="button" class="send-btn" onclick="sendMessage()">Enviar</button>
               <button type="button" class="reset-btn" onclick="resetChat()">Limpar conversa</button>
             </div>
-            <p class="hint">Liga o LinkedIn acima para métricas reais. Descreve qualquer objetivo (seguidores, leads, marca, SSI…) — eu invento a estratégia.</p>
+            <p class="hint">Descreve o que queres (copy, imagem, campanha, site, LinkedIn…). Eu trato com a equipa e trago o resultado.</p>
             <div id="result" class="result"></div>
           </section>
           <footer>PlataformaV1 · Diretor de Marketing AI</footer>
@@ -2352,12 +2353,56 @@ def home() -> str:
           let directorSupabaseClient = null;
           let directorLinkedinSession = null;
           const WORKFLOW_STORAGE_KEY = "plataforma_director_workflow";
+          const DIRECTOR_WELCOME = (
+            "Olá! Sou o teu Diretor de Marketing. Diz-me o que queres fazer — "
+            + "copy, imagem, campanha, site ou outro canal — e eu coordeno a equipa por ti."
+          );
+
+          function setDirectorLinkedinBarVisible(visible) {
+            const bar = document.getElementById("linkedinAuthBar");
+            const hint = document.getElementById("linkedinProfileHint");
+            if (bar) bar.classList.toggle("director-linkedin-hidden", !visible);
+            if (hint) hint.classList.toggle("director-linkedin-hidden", !visible);
+          }
+
+          function normalizePersistedWorkflowState(ws) {
+            if (!ws || typeof ws !== "object") return null;
+            const stage = String(ws.stage || "idle");
+            if (stage === "strategy_brief" && !ws.strategy) {
+              ws.stage = "idle";
+              if (Array.isArray(ws.channels)) {
+                ws.channels = ws.channels.filter((c) => String(c).toLowerCase() !== "linkedin");
+              }
+            }
+            return ws;
+          }
+
+          function shouldRestoreDirectorPanel(ws) {
+            if (!ws || typeof ws !== "object") return false;
+            const stage = String(ws.stage || "idle");
+            const hasDeliverable = Boolean(
+              ws.strategy
+              || ws.post
+              || (ws.image && ws.image.image_url)
+              || (Array.isArray(ws.linkedin_calendar) && ws.linkedin_calendar.length)
+              || ws.linkedin_analysis
+              || ws.optimization_report
+              || (Array.isArray(ws.followed_profiles) && ws.followed_profiles.length)
+              || (Array.isArray(ws.followed_posts_queue) && ws.followed_posts_queue.length)
+              || ws.engagement_draft
+            );
+            if (stage === "idle" || stage === "planning") {
+              return Boolean(ws.post || (ws.image && ws.image.image_url) || ws.execution_plan);
+            }
+            if (stage === "strategy_brief" && !ws.strategy) return false;
+            return hasDeliverable;
+          }
 
           function loadWorkflowState() {
             try {
               const raw = localStorage.getItem(WORKFLOW_STORAGE_KEY);
               if (!raw) return;
-              workflowState = JSON.parse(raw);
+              workflowState = normalizePersistedWorkflowState(JSON.parse(raw));
             } catch (e) {}
           }
 
@@ -2418,10 +2463,10 @@ def home() -> str:
                   return parsed.reply.trim();
                 }
               } catch (e) {}
-              return "Defini a estratégia LinkedIn. Revê o plano completo no painel abaixo.";
+              return "Plano pronto. Revê os detalhes no painel abaixo.";
             }
             if (t.startsWith("{") && t.length > 120) {
-              return "Defini a estratégia LinkedIn. Revê o plano completo no painel abaixo.";
+              return "Plano pronto. Revê os detalhes no painel abaixo.";
             }
             return t;
           }
@@ -3445,6 +3490,7 @@ def home() -> str:
 
           function renderDirectorPanel(data) {
             const mode = data.orchestration_mode || "planning";
+            const ws = data.workflow_state || workflowState;
             const plan = data.execution_plan
               ? `<p class="plan-line"><strong>Plano:</strong> ${escapeHtml(data.execution_plan)}</p>`
               : "";
@@ -3504,7 +3550,8 @@ def home() -> str:
               idle: "Descreve o que queres (copy, imagem, campanha). Menciona LinkedIn só se for para essa rede."
             }[mode] || "";
 
-            const linkedinContext = isDirectorLinkedinContext(mode, workflowState, deliverables);
+            const linkedinContext = isDirectorLinkedinContext(mode, ws, deliverables);
+            setDirectorLinkedinBarVisible(linkedinContext);
             let workflowHtml = (linkedinContext ? renderProfilePanel(linkedinAnalysis) : "")
               + (linkedinContext ? renderStrategyPanel(strategy, mode) : "")
               + (linkedinContext ? renderOptimizationPanel(optimizationReport, mode) : "")
@@ -3571,6 +3618,19 @@ def home() -> str:
                   <a class="forward-btn" href="${escapeHtml(data.agent_url)}">Ir para ${agentLabel}</a>
                 </div>
               `;
+            }
+
+            const hasWorkflowContent = Boolean(
+              (plan && plan.trim())
+              || workflowHtml.trim()
+              || redirectHtml.trim()
+            );
+            const showPanel = hasWorkflowContent
+              || (mode !== "idle" && mode !== "planning" && mode !== "strategy_brief");
+            if (!showPanel) {
+              result.innerHTML = "";
+              if (!linkedinContext) setDirectorLinkedinBarVisible(false);
+              return;
             }
 
             result.innerHTML = `
@@ -3758,17 +3818,19 @@ def home() -> str:
             workflowState = null;
             saveWorkflowState();
             chatLog.innerHTML = "";
-            result.innerHTML = "<p>Conversa reiniciada.</p>";
-            addMessage("assistant", "Olá! Sou o teu Diretor de Marketing. Liga o LinkedIn acima se quiseres métricas reais. Depois diz-me o que queres atingir — eu defino a estratégia.");
+            result.innerHTML = "";
+            setDirectorLinkedinBarVisible(false);
+            addMessage("assistant", DIRECTOR_WELCOME);
           }
 
           loadWorkflowState();
-          addMessage("assistant", "Olá! Sou o teu Diretor de Marketing. Liga o LinkedIn acima se quiseres métricas reais. Depois diz-me o que queres atingir — eu defino a estratégia.");
+          setDirectorLinkedinBarVisible(false);
+          addMessage("assistant", DIRECTOR_WELCOME);
           (async function bootstrapDirectorPage() {
             await initDirectorSupabaseFromUrl();
             await refreshDirectorLinkedinAuth();
             await processDirectorPublishOAuthReturn();
-            if (workflowState && (workflowState.strategy || workflowState.linkedin_analysis || workflowState.linkedin_calendar || workflowState.optimization_report || workflowState.followed_profiles || workflowState.followed_profile_suggestions)) {
+            if (shouldRestoreDirectorPanel(workflowState)) {
               renderDirectorPanel({
                 orchestration_mode: workflowState.stage || "idle",
                 execution_plan: workflowState.execution_plan || "",
