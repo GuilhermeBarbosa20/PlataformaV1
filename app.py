@@ -3099,7 +3099,7 @@ def home() -> str:
                 </div>
                 ${sugRows ? `<div style="margin-bottom:10px"><h5 style="margin:0 0 6px;font-size:0.85rem">Sugestões (confirma)</h5>${sugRows}
                   <button type="button" class="wf-btn wf-btn-approve" style="margin-top:6px;padding:6px 10px;font-size:0.75rem" onclick="acceptAllFollowedSuggestions()">Adicionar todas</button></div>` : ""}
-                ${profRows ? `<ul class="strategy-list">${profRows}</ul>` : "<p class=\"post-meta\">Ainda não adicionaste perfis.</p>"}
+                ${profRows ? `<ul class="strategy-list">${profRows}</ul>` : `<p class="post-meta">Ainda não adicionaste perfis.</p>`}
                 ${postRows ? `<div style="margin-top:10px">${postRows}</div>` : ""}
               </div>`;
           }
