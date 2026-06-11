@@ -43,9 +43,11 @@ from agents.director_optimization import (
     generate_optimization_report,
     optimization_has_content,
 )
+from agents.director_intent import classify_director_intent
 from agents.director_strategy import (
     generate_linkedin_strategy,
     is_linkedin_strategy_intent,
+    normalize_text as normalize_director_text,
     sanitize_strategy_chat_reply,
     strategy_brief_for_execution,
     strategy_has_core_content,
@@ -128,9 +130,15 @@ _FOLLOWED_ENGAGEMENT_MARKERS = (
     "perfis para seguir",
     "perfil para seguir",
     "perfis a seguir",
+    "pessoas para seguir",
+    "pessoas a seguir",
+    "pessoas que sigo",
+    "sugestoes de pessoas",
+    "sugestao de pessoas",
     "perfis que sigo",
     "quem seguir",
     "seguir perfis",
+    "seguir pessoas",
     "comentar publicac",
     "comentar posts",
     "comentarios em public",
@@ -342,7 +350,7 @@ def _channels_from_assignments(
     """
 
     _ = assignments
-    normalized = normalize_text(last_user_text) if last_user_text else ""
+    normalized = normalize_director_text(last_user_text) if last_user_text else ""
     channels: List[str] = []
     if text_mentions_linkedin(normalized):
         channels.append("linkedin")
@@ -436,7 +444,7 @@ def _is_followed_engagement_intent(normalized: str) -> bool:
         return False
     if any(marker in normalized for marker in _FOLLOWED_ENGAGEMENT_MARKERS):
         return True
-    if "perfil" in normalized and "seguir" in normalized:
+    if "seguir" in normalized and ("perfil" in normalized or "pessoa" in normalized):
         return True
     if "comentar" in normalized and ("public" in normalized or "post" in normalized):
         return True
@@ -461,13 +469,16 @@ def _wants_auto_suggest_followed_profiles(normalized: str) -> bool:
         "sugerir",
         "sugest",
         "quero perfis",
+        "quero pessoas",
         "perfis para",
+        "pessoas para",
         "perfis a seguir",
+        "pessoas a seguir",
         "quem seguir",
     )
     if any(marker in normalized for marker in markers):
         return True
-    return "perfil" in normalized and "seguir" in normalized
+    return "seguir" in normalized and ("perfil" in normalized or "pessoa" in normalized)
 
 
 def _handle_followed_engagement_chat_intent(
@@ -476,6 +487,8 @@ def _handle_followed_engagement_chat_intent(
     client: OpenAI,
     model: str,
     language: str,
+    *,
+    auto_suggest: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """Abre o fluxo de perfis seguidos e comentários conforme o pedido no chat.
 
@@ -503,7 +516,11 @@ def _handle_followed_engagement_chat_intent(
         ACTION_GENERATE_ENGAGEMENT,
     ]
 
-    wants_suggest = _wants_auto_suggest_followed_profiles(normalized)
+    wants_suggest = (
+        auto_suggest
+        if auto_suggest is not None
+        else _wants_auto_suggest_followed_profiles(normalized)
+    )
     strategy_ok = strategy_has_core_content(state.get("strategy") or {})
 
     if wants_suggest and strategy_ok and copywriter_agent.is_configured():
@@ -1373,6 +1390,258 @@ def _start_copy_from_strategy(
     }
 
 
+def _classify_user_intent_with_fallback(
+    client: OpenAI,
+    model: str,
+    sanitized: Sequence[Dict[str, str]],
+    state: Dict[str, Any],
+    language: str,
+    last_user_text: str,
+    normalize_text_fn: Callable[[str], str],
+) -> Dict[str, Any]:
+    """Classifica intenção com OpenAI e reforça com fallback por keywords.
+
+    Argumentos:
+        client: Cliente OpenAI.
+        model: Modelo LLM.
+        sanitized: Histórico da conversa.
+        state: Estado do workflow.
+        language: Idioma.
+        last_user_text: Última mensagem do utilizador.
+        normalize_text_fn: Função de normalização injectada pelo router.
+
+    Retorno:
+        Dicionário de classificação (``intent``, ``confidence``, etc.).
+    """
+
+    try:
+        classification = classify_director_intent(
+            client, model, sanitized, state, language
+        )
+    except Exception:  # noqa: BLE001
+        classification = {
+            "intent": "general_plan",
+            "confidence": 0.0,
+            "user_goal": "",
+            "auto_suggest_profiles": False,
+            "reply": "",
+        }
+
+    intent = str(classification.get("intent") or "general_plan")
+    confidence = float(classification.get("confidence") or 0)
+    normalized = normalize_text_fn(last_user_text)
+
+    if confidence < 0.55 and intent in {"general_plan", "continue_current", "clarify"}:
+        if _is_followed_engagement_intent(normalized):
+            classification["intent"] = "followed_profiles"
+            classification["confidence"] = 0.82
+            classification["auto_suggest_profiles"] = _wants_auto_suggest_followed_profiles(
+                normalized
+            )
+        elif _is_design_only_request(normalized) and not text_mentions_linkedin(normalized):
+            classification["intent"] = "standalone_image"
+            classification["confidence"] = 0.78
+        elif _is_copy_only_request(normalized):
+            classification["intent"] = "standalone_copy"
+            classification["confidence"] = 0.78
+        elif _should_enter_linkedin_strategy(state, last_user_text):
+            classification["intent"] = "linkedin_strategy"
+            classification["confidence"] = 0.75
+
+    return classification
+
+
+def _apply_director_intent_classification(
+    classification: Dict[str, Any],
+    *,
+    state: Dict[str, Any],
+    sanitized: Sequence[Dict[str, str]],
+    last_user_text: str,
+    language: str,
+    client: OpenAI,
+    model: str,
+    agent_page_url: Callable[[str], str],
+    normalize_text_fn: Callable[[str], str],
+    allow_continue: bool = True,
+) -> Optional[Dict[str, Any]]:
+    """Executa o fluxo correspondente à intenção classificada pelo LLM.
+
+    Argumentos:
+        classification: Resultado de ``_classify_user_intent_with_fallback``.
+        state: Estado mutável do workflow.
+        sanitized: Histórico da conversa.
+        last_user_text: Última mensagem do utilizador.
+        language: Idioma.
+        client: Cliente OpenAI.
+        model: Modelo LLM.
+        agent_page_url: Resolver URLs dos agentes.
+        normalize_text_fn: Normalização de texto.
+        allow_continue: Se ``False``, ignora ``continue_current`` e ``general_plan``
+            mas tenta rotear pedidos concretos (útil em ``strategy_approved``).
+
+    Retorno:
+        Payload parcial para ``base_response``, ou ``None`` para continuar o fluxo.
+    """
+
+    intent = str(classification.get("intent") or "general_plan")
+    confidence = float(classification.get("confidence") or 0)
+    min_confidence = 0.4
+
+    if allow_continue and intent == "continue_current":
+        return None
+    if intent == "general_plan" and allow_continue:
+        return None
+    if confidence < min_confidence and intent != "clarify":
+        return None
+
+    normalized = normalize_text_fn(last_user_text)
+    stage = str(state.get("stage") or STAGE_IDLE)
+
+    if intent == "clarify":
+        return {
+            "reply": (
+                classification.get("reply")
+                or "Podes explicar um pouco melhor o que queres fazer?"
+            ),
+            "orchestration_mode": stage,
+            "workflow_state": state,
+            "deliverables": _deliverables_from_state(state),
+            "pending_actions": state.get("pending_actions") or [],
+            "agents_involved": [],
+        }
+
+    if intent in {"followed_profiles", "engagement_comment"}:
+        auto_flag = classification.get("auto_suggest_profiles")
+        if intent == "engagement_comment" and not auto_flag:
+            auto_flag = False
+        elif intent == "followed_profiles" and auto_flag is None:
+            auto_flag = True
+        return _handle_followed_engagement_chat_intent(
+            state,
+            normalized,
+            client,
+            model,
+            language,
+            auto_suggest=auto_flag,
+        )
+
+    if intent == "standalone_image" and not text_mentions_linkedin(normalized):
+        if stage in {
+            STAGE_COPY_REVIEW,
+            STAGE_IMAGE_REVIEW,
+            STAGE_PUBLISH_CONFIRM,
+            STAGE_ENGAGEMENT_REVIEW,
+        }:
+            return None
+        return _handle_standalone_design_request(
+            state, sanitized, language, agent_page_url=agent_page_url
+        )
+
+    if intent == "standalone_copy" and not text_mentions_linkedin(normalized):
+        if stage in {STAGE_COPY_REVIEW, STAGE_PUBLISH_CONFIRM, STAGE_ENGAGEMENT_REVIEW}:
+            return None
+        return _handle_standalone_copy_request(
+            state, sanitized, language, agent_page_url=agent_page_url
+        )
+
+    if intent == "linkedin_strategy":
+        if stage in {STAGE_STRATEGY_BRIEF, STAGE_STRATEGY_REVIEW} and allow_continue:
+            return None
+        return _generate_and_review_strategy(
+            client=client,
+            model=model,
+            messages=sanitized,
+            language=language,
+            state=state,
+            previous_strategy=state.get("strategy"),
+        )
+
+    if intent == "linkedin_posts":
+        if not state.get("strategy"):
+            return {
+                "reply": (
+                    "Para gerar posts preciso primeiro de uma estratégia LinkedIn. "
+                    "Descreve os teus objectivos e eu monto o plano."
+                ),
+                "orchestration_mode": stage,
+                "workflow_state": state,
+                "deliverables": _deliverables_from_state(state),
+                "pending_actions": state.get("pending_actions") or [],
+            }
+        try:
+            return _start_execution_from_strategy(
+                state=state,
+                sanitized=sanitized,
+                language=language,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "reply": f"Não consegui gerar os posts: {exc!s}",
+                "orchestration_mode": stage,
+                "workflow_state": state,
+                "deliverables": _deliverables_from_state(state),
+                "pending_actions": state.get("pending_actions") or [],
+            }
+
+    if intent == "linkedin_optimization":
+        if not strategy_has_core_content(state.get("strategy") or {}):
+            return {
+                "reply": "Preciso de uma estratégia aprovada antes de optimizar.",
+                "orchestration_mode": stage,
+                "workflow_state": state,
+                "deliverables": _deliverables_from_state(state),
+            }
+        if not isinstance(state.get("linkedin_analysis"), dict):
+            return {
+                "reply": "Analisa o perfil LinkedIn no painel antes de pedir optimização.",
+                "orchestration_mode": stage,
+                "workflow_state": state,
+                "deliverables": _deliverables_from_state(state),
+            }
+        try:
+            opt = generate_optimization_report(client, model, state, language)
+            report = opt.get("report") if isinstance(opt.get("report"), dict) else {}
+            state["optimization_report"] = report
+            state["stage"] = STAGE_OPTIMIZATION_REVIEW
+            state["pending_actions"] = [
+                ACTION_APPROVE_OPTIMIZATION,
+                ACTION_DISMISS_OPTIMIZATION,
+            ]
+            reply = str(opt.get("reply") or "").strip() or (
+                "Comparei as métricas com a tua estratégia. Revê o relatório no painel."
+            )
+            return {
+                "reply": reply,
+                "orchestration_mode": STAGE_OPTIMIZATION_REVIEW,
+                "workflow_state": state,
+                "deliverables": _deliverables_from_state(state),
+                "pending_actions": state["pending_actions"],
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "reply": f"Não consegui gerar optimização: {exc!s}",
+                "orchestration_mode": stage,
+                "workflow_state": state,
+                "deliverables": _deliverables_from_state(state),
+            }
+
+    if not allow_continue and intent == "general_plan":
+        goal = str(classification.get("user_goal") or "").strip()
+        hint = f" Percebi: {goal}." if goal else ""
+        return {
+            "reply": (
+                f"{hint} Podes pedir posts da estratégia, perfis para seguir, "
+                "comentários, copy, imagem ou outra tarefa — diz o que preferes."
+            ).strip(),
+            "orchestration_mode": stage,
+            "workflow_state": state,
+            "deliverables": _deliverables_from_state(state),
+            "pending_actions": state.get("pending_actions") or [],
+        }
+
+    return None
+
+
 def process_director_turn(
     *,
     messages: Sequence[Dict[str, str]],
@@ -1442,17 +1711,31 @@ def process_director_turn(
         "pending_actions": state.get("pending_actions") or [],
     }
 
+    intent_classification: Optional[Dict[str, Any]] = None
     if last_user_text and not user_action and not inferred:
-        normalized_intent = normalize_text(last_user_text)
-        if _is_followed_engagement_intent(normalized_intent):
-            engagement_result = _handle_followed_engagement_chat_intent(
-                state=state,
-                normalized=normalized_intent,
-                client=client,
-                model=openai_model,
-                language=language,
-            )
-            base_response.update(engagement_result)
+        intent_classification = _classify_user_intent_with_fallback(
+            client,
+            openai_model,
+            sanitized,
+            state,
+            language,
+            last_user_text,
+            normalize_text,
+        )
+        routed = _apply_director_intent_classification(
+            intent_classification,
+            state=state,
+            sanitized=sanitized,
+            last_user_text=last_user_text,
+            language=language,
+            client=client,
+            model=openai_model,
+            agent_page_url=agent_page_url,
+            normalize_text_fn=normalize_text,
+            allow_continue=True,
+        )
+        if routed is not None:
+            base_response.update(routed)
             return base_response
 
     # --- Estratégia LinkedIn ---
@@ -1531,17 +1814,32 @@ def process_director_turn(
         return base_response
 
     if state["stage"] == STAGE_STRATEGY_APPROVED and last_user_text and not user_action:
-        normalized_approved = normalize_text(last_user_text)
-        if _is_followed_engagement_intent(normalized_approved):
-            engagement_result = _handle_followed_engagement_chat_intent(
-                state=state,
-                normalized=normalized_approved,
-                client=client,
-                model=openai_model,
-                language=language,
+        if intent_classification is None:
+            intent_classification = _classify_user_intent_with_fallback(
+                client,
+                openai_model,
+                sanitized,
+                state,
+                language,
+                last_user_text,
+                normalize_text,
             )
-            base_response.update(engagement_result)
+        routed = _apply_director_intent_classification(
+            intent_classification,
+            state=state,
+            sanitized=sanitized,
+            last_user_text=last_user_text,
+            language=language,
+            client=client,
+            model=openai_model,
+            agent_page_url=agent_page_url,
+            normalize_text_fn=normalize_text,
+            allow_continue=False,
+        )
+        if routed is not None:
+            base_response.update(routed)
             return base_response
+        normalized_approved = normalize_text(last_user_text)
         if _is_copy_or_design_request(normalized_approved) or (
             "post" in normalized_approved and "seguir" not in normalized_approved
         ):
@@ -1556,10 +1854,12 @@ def process_director_turn(
             except Exception as exc:  # noqa: BLE001
                 base_response["reply"] = f"Não consegui gerar os posts: {exc!s}"
                 return base_response
+        goal = str((intent_classification or {}).get("user_goal") or "").strip()
+        hint = f" Percebi: {goal}." if goal else ""
         base_response["reply"] = (
-            "Estratégia aprovada. Clica em «Iniciar execução» para o primeiro post "
-            "ou pede outro post alinhado com o plano."
-        )
+            f"{hint} A estratégia está aprovada — podes pedir posts, perfis para seguir, "
+            "comentários, copy ou imagem. Diz o que queres fazer agora."
+        ).strip()
         base_response["workflow_state"] = state
         base_response["pending_actions"] = state.get("pending_actions") or []
         return base_response

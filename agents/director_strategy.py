@@ -84,6 +84,23 @@ LINKEDIN_GOAL_VERBS = (
 )
 
 
+def normalize_text(text: str) -> str:
+    """Normaliza texto do utilizador para comparação de intenções e keywords.
+
+    Converte para minúsculas, remove acentos portugueses comuns e comprime
+    espaços, para que termos como «publicação» e «publicacao» sejam tratados
+    de forma equivalente no routing do Diretor.
+
+    Argumentos:
+        text: Mensagem original do utilizador ou fragmento de brief.
+
+    Retorno:
+        String normalizada pronta para ``in``/regex em detecção de intenção.
+    """
+
+    return _normalize_for_match(str(text or "").strip())
+
+
 def _normalize_for_match(text: str) -> str:
     """Compacta texto para comparação insensível a acentos básicos."""
 
