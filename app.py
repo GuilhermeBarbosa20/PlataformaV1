@@ -2213,6 +2213,74 @@ def home() -> str:
             background: rgba(16, 185, 129, 0.08);
           }
           .profile-panel h5 { margin: 0 0 6px; color: #6ee7b7; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.04em; }
+          .director-collapse {
+            margin-top: 12px;
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            background: rgba(15, 23, 42, 0.6);
+            overflow: hidden;
+          }
+          .director-collapse-summary {
+            margin: 0;
+            padding: 12px 14px;
+            cursor: pointer;
+            list-style: none;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            font-size: 0.95rem;
+            font-weight: 600;
+            color: #e2e8f0;
+            user-select: none;
+          }
+          .director-collapse-summary::-webkit-details-marker { display: none; }
+          .director-collapse-summary::after {
+            content: "▾";
+            font-size: 0.95rem;
+            color: #94a3b8;
+            transition: transform 0.2s ease;
+            flex-shrink: 0;
+          }
+          .director-collapse:not([open]) .director-collapse-summary::after {
+            transform: rotate(-90deg);
+          }
+          .director-collapse-body {
+            padding: 0 14px 14px;
+            border-top: 1px solid rgba(255, 255, 255, 0.06);
+          }
+          .director-collapse--profile {
+            background: rgba(16, 185, 129, 0.08);
+            border-color: rgba(16, 185, 129, 0.25);
+          }
+          .director-collapse--profile .director-collapse-summary {
+            color: #6ee7b7;
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+          }
+          .director-collapse--strategy .director-collapse-summary { color: #e2e8f0; }
+          .director-collapse--calendar .director-collapse-summary { color: #e2e8f0; }
+          .director-collapse--optimization {
+            background: rgba(88, 28, 135, 0.15);
+            border-color: rgba(168, 85, 247, 0.35);
+          }
+          .director-collapse--optimization .director-collapse-summary { color: #e9d5ff; }
+          .director-collapse--publish {
+            border-color: rgba(14, 165, 233, 0.35);
+            background: rgba(15, 23, 42, 0.65);
+          }
+          .director-collapse--publish .director-collapse-summary { color: #7dd3fc; }
+          .director-collapse--followed {
+            border-color: rgba(251, 191, 36, 0.35);
+            background: rgba(69, 26, 3, 0.15);
+          }
+          .director-collapse--followed .director-collapse-summary { color: #fcd34d; }
+          .director-collapse--engagement {
+            border-color: rgba(251, 191, 36, 0.35);
+            background: rgba(69, 26, 3, 0.2);
+          }
+          .director-collapse--engagement .director-collapse-summary { color: #fcd34d; }
           .stage-hint {
             margin: 0 0 12px;
             color: #94a3b8;
@@ -2954,6 +3022,52 @@ def home() -> str:
             }));
           }
 
+          const DIRECTOR_PANEL_COLLAPSE_KEY = "plataforma_director_panel_collapsed";
+
+          function getDirectorPanelCollapsedMap() {
+            try {
+              const raw = localStorage.getItem(DIRECTOR_PANEL_COLLAPSE_KEY);
+              return raw ? JSON.parse(raw) : {};
+            } catch (e) {
+              return {};
+            }
+          }
+
+          function saveDirectorPanelCollapsed(panelId, collapsed) {
+            try {
+              const map = getDirectorPanelCollapsedMap();
+              map[panelId] = collapsed;
+              localStorage.setItem(DIRECTOR_PANEL_COLLAPSE_KEY, JSON.stringify(map));
+            } catch (e) {}
+          }
+
+          function wrapDirectorCollapsiblePanel(panelId, title, bodyHtml, defaultOpen, variantClass) {
+            const map = getDirectorPanelCollapsedMap();
+            let open = defaultOpen;
+            if (Object.prototype.hasOwnProperty.call(map, panelId)) {
+              open = map[panelId] !== true;
+            }
+            const openAttr = open ? " open" : "";
+            const variant = variantClass ? ` ${variantClass}` : "";
+            return `<details class="director-collapse${variant}" data-panel-id="${escapeHtml(panelId)}"${openAttr}>
+              <summary class="director-collapse-summary">${escapeHtml(title)}</summary>
+              <div class="director-collapse-body">${bodyHtml}</div>
+            </details>`;
+          }
+
+          function attachDirectorPanelCollapseListeners(root) {
+            const container = root || result;
+            if (!container) return;
+            container.querySelectorAll("details.director-collapse[data-panel-id]").forEach((el) => {
+              if (el.dataset.collapseBound === "1") return;
+              el.dataset.collapseBound = "1";
+              el.addEventListener("toggle", () => {
+                const id = el.getAttribute("data-panel-id");
+                if (id) saveDirectorPanelCollapsed(id, !el.open);
+              });
+            });
+          }
+
           function renderStrategyPanel(strategy, mode) {
             if (!strategy) return "";
             const icp = strategy.icp || {};
@@ -3022,9 +3136,7 @@ def home() -> str:
                 </div>`;
             }
 
-            return `
-              <div class="strategy-panel">
-                <h4>Estratégia LinkedIn</h4>
+            const body = `
                 ${strategy.summary ? `<p class="post-meta">${escapeHtml(strategy.summary)}</p>` : ""}
                 <div class="strategy-section">
                   <h5>ICP — público-alvo</h5>
@@ -3036,11 +3148,18 @@ def home() -> str:
                 ${formatHtml ? `<div class="strategy-section"><h5>Mix de formatos</h5>${formatHtml}</div>` : ""}
                 ${scenarios.length ? `<div class="strategy-section"><h5>Cenários</h5>${scenarioHtml}</div>` : ""}
                 ${tacticsHtml ? `<div class="strategy-section"><h5>Táticas orgânicas</h5>${tacticsHtml}</div>` : ""}
-                ${actionsHtml}
-              </div>`;
+                ${actionsHtml}`;
+            const defaultOpen = ["strategy_brief", "strategy_review"].includes(mode);
+            return wrapDirectorCollapsiblePanel(
+              "strategy",
+              "Estratégia LinkedIn",
+              body,
+              defaultOpen,
+              "director-collapse--strategy"
+            );
           }
 
-          function renderCalendarPanel(calendar, activePostId) {
+          function renderCalendarPanel(calendar, activePostId, mode) {
             if (!calendar || !calendar.length) return "";
             const rows = calendar.map((entry) => {
               const post = entry.post || {};
@@ -3061,7 +3180,14 @@ def home() -> str:
                 </div>
               </div>`;
             }).join("");
-            return `<div class="calendar-panel"><h4>Calendário da semana</h4>${rows}</div>`;
+            const defaultOpen = ["posts_review", "copy_review", "image_confirm", "image_review", "publish_confirm"].includes(mode);
+            return wrapDirectorCollapsiblePanel(
+              "calendar",
+              "Calendário da semana",
+              rows,
+              defaultOpen,
+              "director-collapse--calendar"
+            );
           }
 
           const OPT_STATUS_LABEL = {
@@ -3118,9 +3244,7 @@ def home() -> str:
                   <button type="button" class="wf-btn wf-btn-secondary" onclick="dismissOptimization()">Manter estratégia actual</button>
                 </div>`;
             }
-            return `
-              <div class="optimization-panel">
-                <h4>${escapeHtml(report.headline || "Optimização LinkedIn")}</h4>
+            const body = `
                 <span class="opt-status-badge ${escapeHtml(status)}">${escapeHtml(statusLabel)}</span>
                 ${execHtml}
                 ${objTable}
@@ -3128,19 +3252,29 @@ def home() -> str:
                 ${insightsHtml}
                 ${recHtml}
                 ${adjSummary}
-                ${actionsHtml}
-              </div>`;
+                ${actionsHtml}`;
+            return wrapDirectorCollapsiblePanel(
+              "optimization",
+              report.headline || "Optimização LinkedIn",
+              body,
+              mode === "optimization_review",
+              "director-collapse--optimization"
+            );
           }
 
           function renderPublishPanel(post, mode) {
             if (!post) return "";
             if (post.published_on_linkedin) {
-              return `
-                <div class="publish-panel">
-                  <h4>Publicado no LinkedIn</h4>
+              const body = `
                   <p class="post-meta">${post.published_with_image ? "Com imagem" : "Só texto"}</p>
-                  ${post.linkedin_post_urn ? `<p class="post-meta">ID: ${escapeHtml(String(post.linkedin_post_urn))}</p>` : ""}
-                </div>`;
+                  ${post.linkedin_post_urn ? `<p class="post-meta">ID: ${escapeHtml(String(post.linkedin_post_urn))}</p>` : ""}`;
+              return wrapDirectorCollapsiblePanel(
+                "publish_done",
+                "Publicado no LinkedIn",
+                body,
+                false,
+                "director-collapse--publish"
+              );
             }
             if (mode !== "publish_confirm") return "";
             const hasImg = !!(post.generated_image_url);
@@ -3152,17 +3286,21 @@ def home() -> str:
             const imgBtn = hasImg
               ? `<button type="button" class="wf-btn wf-btn-approve" onclick="directorPublishCurrentPost(true)">Publicar texto + imagem</button>`
               : "";
-            return `
-              <div class="publish-panel">
-                <h4>Publicar no LinkedIn</h4>
+            const body = `
                 <p class="post-meta">O login acima analisa o perfil; autoriza aqui para publicar posts (permissão w_member_social).</p>
                 <div class="workflow-actions" style="flex-wrap:wrap;align-items:center;gap:8px">
                   ${authHtml}
                   <button type="button" class="wf-btn wf-btn-approve" onclick="directorPublishCurrentPost(false)">Publicar só texto</button>
                   ${imgBtn}
                   <button type="button" class="wf-btn wf-btn-secondary" onclick="skipPublish()">Avançar sem publicar</button>
-                </div>
-              </div>`;
+                </div>`;
+            return wrapDirectorCollapsiblePanel(
+              "publish",
+              "Publicar no LinkedIn",
+              body,
+              true,
+              "director-collapse--publish"
+            );
           }
 
           function renderFollowedFeedPanel(profiles, queue, suggestions, mode) {
@@ -3207,9 +3345,7 @@ def home() -> str:
                 </div>
               </div>`;
             }).join("");
-            return `
-              <div class="calendar-panel" style="border-color:rgba(251,191,36,0.35)">
-                <h4>Comentar publicações de perfis que sigo</h4>
+            const body = `
                 <p class="post-meta">Sugiro perfis com base na tua estratégia/ICP — confirmas antes de adicionar. Depois recolho posts públicos (Apify) e proponho comentários para aprovares.</p>
                 <div class="workflow-actions" style="margin-bottom:10px;flex-wrap:wrap">
                   <button type="button" class="wf-btn wf-btn-strategy" onclick="suggestFollowedProfiles()">Sugerir perfis (ICP)</button>
@@ -3220,8 +3356,15 @@ def home() -> str:
                 ${sugRows ? `<div style="margin-bottom:10px"><h5 style="margin:0 0 6px;font-size:0.85rem">Sugestões (confirma)</h5>${sugRows}
                   <button type="button" class="wf-btn wf-btn-approve" style="margin-top:6px;padding:6px 10px;font-size:0.75rem" onclick="acceptAllFollowedSuggestions()">Adicionar todas</button></div>` : ""}
                 ${profRows ? `<ul class="strategy-list">${profRows}</ul>` : `<p class="post-meta">Ainda não adicionaste perfis.</p>`}
-                ${postRows ? `<div style="margin-top:10px">${postRows}</div>` : ""}
-              </div>`;
+                ${postRows ? `<div style="margin-top:10px">${postRows}</div>` : ""}`;
+            const defaultOpen = mode === "followed_feed" || mode === "engagement_review";
+            return wrapDirectorCollapsiblePanel(
+              "followed_feed",
+              "Comentar publicações de perfis que sigo",
+              body,
+              defaultOpen,
+              "director-collapse--followed"
+            );
           }
 
           function renderEngagementPanel(draft, mode) {
@@ -3240,17 +3383,21 @@ def home() -> str:
                 <button type="button" class="wf-btn wf-btn-secondary" onclick="copyEngagementToClipboard()">Copiar texto</button>
                 <button type="button" class="wf-btn wf-btn-image" onclick="regenerateEngagement()">Refazer</button>
               </div>` : "";
-            return `
-              <div class="engagement-panel">
-                <h4>Comentário para publicação de terceiro</h4>
+            const body = `
                 <p class="post-meta">${escapeHtml(draft.target_label || "")}</p>
                 ${draft.target_snippet ? `<p class="post-meta" style="font-style:italic">«${escapeHtml(String(draft.target_snippet).slice(0, 200))}»</p>` : ""}
                 ${openPost}
                 ${draft.angle ? `<p class="post-meta">${escapeHtml(draft.angle)}</p>` : ""}
                 <textarea id="directorEngagementBody" class="engagement-comment">${escapeHtml(draft.comment_body || "")}</textarea>
                 <p class="post-meta">Depois de aprovar: copia o texto, abre a publicação e cola o comentário.</p>
-                ${actions}
-              </div>`;
+                ${actions}`;
+            return wrapDirectorCollapsiblePanel(
+              "engagement",
+              "Comentário para publicação de terceiro",
+              body,
+              mode === "engagement_review",
+              "director-collapse--engagement"
+            );
           }
 
           function renderProfilePanel(snapshot) {
@@ -3260,13 +3407,17 @@ def home() -> str:
               .map(([k, v]) => `<li>${escapeHtml(k)}: ${escapeHtml(String(v))}</li>`).join("");
             const insights = (snapshot.principais_insights || []).slice(0, 3)
               .map((i) => `<li>${escapeHtml(i)}</li>`).join("");
-            return `
-              <div class="profile-panel">
-                <h5>Perfil LinkedIn analisado</h5>
+            const body = `
                 <p class="post-meta">${escapeHtml(snapshot.profile_url)}</p>
                 ${metricLines ? `<ul class="strategy-list">${metricLines}</ul>` : ""}
-                ${insights ? `<ul class="strategy-list">${insights}</ul>` : ""}
-              </div>`;
+                ${insights ? `<ul class="strategy-list">${insights}</ul>` : ""}`;
+            return wrapDirectorCollapsiblePanel(
+              "profile",
+              "Perfil LinkedIn analisado",
+              body,
+              false,
+              "director-collapse--profile"
+            );
           }
 
           function renderDirectorPanel(data) {
@@ -3333,7 +3484,7 @@ def home() -> str:
             let workflowHtml = renderProfilePanel(linkedinAnalysis)
               + renderStrategyPanel(strategy, mode)
               + renderOptimizationPanel(optimizationReport, mode)
-              + renderCalendarPanel(calendar, activePostId)
+              + renderCalendarPanel(calendar, activePostId, mode)
               + renderPublishPanel(post, mode)
               + renderFollowedFeedPanel(followedProfiles, followedPostsQueue, followedSuggestions, mode)
               + renderEngagementPanel(engagementDraft, mode);
@@ -3406,6 +3557,7 @@ def home() -> str:
               ${redirectHtml}
               ${workflowHtml}
             `;
+            attachDirectorPanelCollapseListeners(result);
           }
 
           window.approveStrategy = () => directorAction("approve_strategy", {}, "Aprovo a estratégia.");
