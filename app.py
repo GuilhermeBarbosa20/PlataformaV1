@@ -2767,7 +2767,7 @@ def home() -> str:
               return;
             }
             const modeLabel = includeImage ? "texto + imagem" : "só texto";
-            if (!confirm("Publicar no LinkedIn (" + modeLabel + ")?\n\nSerá usada a tua conta ligada.")) return;
+            if (!confirm(`Publicar no LinkedIn (${modeLabel})?\n\nSerá usada a tua conta ligada.`)) return;
             const payload = {
               supabase_access_token: directorLinkedinSession.access_token,
               linkedin_publish_access_token: publishTok || undefined,
