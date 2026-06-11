@@ -173,6 +173,51 @@ def upsert_user_linkedin_publish_oauth_to_database(
         return False
 
 
+def clear_user_linkedin_publish_oauth_from_database(
+    access_token: str,
+    supabase_url: str,
+    anon_key: str,
+    user_id: str,
+) -> bool:
+    """Remove autorização de publicação LinkedIn do utilizador (token revogado).
+
+    Argumentos:
+        access_token: JWT da sessão Supabase.
+        supabase_url: URL base do projecto.
+        anon_key: Chave anon.
+        user_id: UUID do utilizador.
+
+    Retorno:
+        ``True`` se a linha foi apagada ou já não existia.
+    """
+
+    token = str(access_token or "").strip()
+    base = str(supabase_url or "").strip().rstrip("/")
+    key = str(anon_key or "").strip()
+    uid = str(user_id or "").strip()
+    if not token or not base or not key or not uid:
+        return False
+
+    query = urllib.parse.urlencode({"user_id": f"eq.{uid}"})
+    url = f"{base}/rest/v1/user_linkedin_publish_oauth?{query}"
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "apikey": key,
+            "Accept": "application/json",
+        },
+        method="DELETE",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            return 200 <= resp.status < 300
+    except urllib.error.HTTPError as exc:
+        return exc.code in (204, 404)
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return False
+
+
 def publish_oauth_status_for_client(row: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Expõe estado de autorização sem devolver o token ao frontend.
 

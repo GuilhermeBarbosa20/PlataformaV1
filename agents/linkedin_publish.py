@@ -422,13 +422,85 @@ def _post_ugc(access_token: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         post_urn = headers.get("x-restli-id") or headers.get("x-linkedIn-id")
         return {"success": True, "linkedin_post_urn": post_urn}
     err_text = raw.decode("utf-8", errors="replace")[:500]
+    revoked = is_linkedin_token_revoked_error(status, err_text)
+    if revoked:
+        return {
+            "success": False,
+            "error": (
+                "O token de publicação LinkedIn foi revogado ou expirou. "
+                "Clica em «Reautorizar publicação LinkedIn» e aceita as permissões outra vez."
+            ),
+            "token_revoked": True,
+        }
     hint = ""
     if status in (401, 403):
         hint = (
-            " Verifica se o login LinkedIn inclui permissão de publicação "
-            "(w_member_social) e se o token não expirou."
+            " Verifica se autorizaste publicação com w_member_social "
+            "(botão «Autorizar publicação LinkedIn», não só o login)."
         )
     return {
         "success": False,
         "error": f"LinkedIn API {status}: {err_text}{hint}",
+        "token_revoked": False,
     }
+
+
+def resolve_linkedin_publish_token_and_urn(
+    *,
+    client_token: str = "",
+    client_person_urn: str = "",
+    oauth_row: Optional[Dict[str, Any]] = None,
+) -> Tuple[str, str]:
+    """Escolhe token e URN válidos para publicar (browser primeiro, depois BD).
+
+    Argumentos:
+        client_token: Token recente do ``sessionStorage`` (fluxo connect-publish).
+        client_person_urn: URN guardado no browser após OAuth.
+        oauth_row: Linha ``user_linkedin_publish_oauth`` da Supabase.
+
+    Retorno:
+        Tuplo ``(access_token, person_urn)`` — pode estar vazio se nada existir.
+    """
+
+    db_tok = ""
+    db_urn = ""
+    if isinstance(oauth_row, dict):
+        db_tok = str(oauth_row.get("linkedin_access_token") or "").strip()
+        db_urn = str(oauth_row.get("linkedin_person_urn") or "").strip()
+
+    client_tok = str(client_token or "").strip()
+    client_urn = str(client_person_urn or "").strip()
+
+    for tok, urn_hint in ((client_tok, client_urn), (db_tok, db_urn)):
+        if not tok:
+            continue
+        urn = urn_hint or (get_linkedin_person_urn(tok) or "")
+        if urn:
+            return tok, urn
+
+    return client_tok or db_tok, client_urn or db_urn
+
+
+def is_linkedin_token_revoked_error(status: int, body: str) -> bool:
+    """Indica se a LinkedIn recusou o pedido por token revogado ou inválido.
+
+    Argumentos:
+        status: Código HTTP da API LinkedIn.
+        body: Corpo da resposta (JSON ou texto).
+
+    Retorno:
+        ``True`` para ``REVOKED_ACCESS_TOKEN`` e erros equivalentes de auth.
+    """
+
+    if int(status) not in (401, 403):
+        return False
+    text = str(body or "").casefold()
+    markers = (
+        "revoked_access_token",
+        '"code":"revoked_access_token"',
+        "serviceerrorcode\":65601",
+        "serviceerrorcode\":65600",
+        "invalid access token",
+        "expired access token",
+    )
+    return any(m in text for m in markers)

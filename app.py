@@ -35,6 +35,7 @@ from agents.linkedin_calendar_db import (
     upsert_user_linkedin_calendar_posts_to_database,
 )
 from agents.linkedin_publish_auth_db import (
+    clear_user_linkedin_publish_oauth_from_database,
     fetch_user_linkedin_publish_oauth_from_database,
     publish_oauth_status_for_client,
     upsert_user_linkedin_publish_oauth_to_database,
@@ -44,6 +45,7 @@ from agents.linkedin_publish import (
     format_linkedin_post_text,
     get_linkedin_person_urn,
     publish_to_linkedin,
+    resolve_linkedin_publish_token_and_urn,
 )
 from agents.director_workflow import process_director_turn
 from agents.social_media import (
@@ -2697,6 +2699,48 @@ def home() -> str:
             }
           }
 
+          function clearDirectorPublishLocalAuth() {
+            try {
+              sessionStorage.removeItem("plataforma_linkedin_publish_token");
+              sessionStorage.removeItem("plataforma_linkedin_publish_person_urn");
+              sessionStorage.removeItem("plataforma_linkedin_publish_expires_at");
+            } catch (e) {}
+            directorPublishAuthorizedServer = false;
+          }
+
+          async function clearDirectorPublishAuth() {
+            clearDirectorPublishLocalAuth();
+            if (directorLinkedinSession && directorLinkedinSession.access_token) {
+              try {
+                await fetch("/agents/linkedin/publish-auth/clear", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    supabase_access_token: directorLinkedinSession.access_token,
+                  }),
+                });
+              } catch (e) {}
+            }
+          }
+
+          function parseApiErrorDetail(data) {
+            const d = data && data.detail;
+            if (!d) return { message: "Falha no pedido.", needReauth: false };
+            if (typeof d === "string") {
+              return {
+                message: d,
+                needReauth: /revogad|reautoriz|w_member_social|autoriza/i.test(d),
+              };
+            }
+            if (typeof d === "object") {
+              return {
+                message: String(d.message || d.msg || "Falha no pedido."),
+                needReauth: Boolean(d.need_reauth),
+              };
+            }
+            return { message: String(d), needReauth: false };
+          }
+
           async function syncDirectorPublishAuthFromServer(session) {
             if (!session || !session.access_token) return false;
             try {
@@ -2744,14 +2788,22 @@ def home() -> str:
             return false;
           }
 
-          async function connectDirectorLinkedinPublish() {
+          async function connectDirectorLinkedinPublish(forceReauth) {
             if (!directorLinkedinSession) {
               alert("Liga o LinkedIn primeiro (botão acima).");
               return;
             }
-            if (directorPublishAuthorizedServer || (await syncDirectorPublishAuthFromServer(directorLinkedinSession))) {
-              alert("Publicação no LinkedIn já está autorizada para esta conta.");
-              return;
+            const mustReauth = forceReauth === true;
+            if (!mustReauth) {
+              const ok = directorPublishAuthorizedServer
+                || !!getDirectorPublishToken()
+                || (await syncDirectorPublishAuthFromServer(directorLinkedinSession));
+              if (ok) {
+                alert("Publicação já autorizada. Se falhar ao publicar, usa «Reautorizar publicação».");
+                return;
+              }
+            } else {
+              await clearDirectorPublishAuth();
             }
             const returnPath = window.location.pathname || "/";
             window.location.href =
@@ -2818,8 +2870,23 @@ def home() -> str:
               });
               const data = await resp.json().catch(() => ({}));
               if (!resp.ok) {
-                const msg = data.detail || data.error || "Falha ao publicar.";
-                throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
+                const parsed = parseApiErrorDetail(data);
+                if (parsed.needReauth) {
+                  await clearDirectorPublishAuth();
+                  if (workflowState) {
+                    renderDirectorPanel({
+                      orchestration_mode: workflowState.stage || "publish_confirm",
+                      workflow_state: workflowState,
+                      deliverables: {
+                        strategy: workflowState.strategy,
+                        linkedin_calendar: workflowState.linkedin_calendar,
+                        post: workflowState.post,
+                        image: workflowState.image,
+                      },
+                    });
+                  }
+                }
+                throw new Error(parsed.message);
               }
               await directorAction("mark_published", {
                 post_id: post.id,
@@ -2828,7 +2895,10 @@ def home() -> str:
               }, "Publiquei no LinkedIn.");
             } catch (err) {
               const msg = err instanceof Error ? err.message : String(err);
-              addMessage("assistant", "Não consegui publicar: " + msg);
+              const extra = /revogad|reautoriz/i.test(msg)
+                ? " Clica em «Reautorizar publicação LinkedIn» no painel."
+                : "";
+              addMessage("assistant", "Não consegui publicar: " + msg + extra);
             }
           }
 
@@ -3075,8 +3145,10 @@ def home() -> str:
             if (mode !== "publish_confirm") return "";
             const hasImg = !!(post.generated_image_url);
             const authHtml = hasDirectorPublishAuth()
-              ? `<span class="publish-auth-ok">Publicação autorizada</span>`
-              : `<button type="button" class="wf-btn wf-btn-strategy" onclick="connectDirectorLinkedinPublish()">Autorizar publicação LinkedIn</button>`;
+              ? `<span class="publish-auth-ok">Publicação autorizada</span>
+                 <button type="button" class="wf-btn wf-btn-secondary" style="padding:6px 10px;font-size:0.75rem"
+                   onclick="connectDirectorLinkedinPublish(true)">Reautorizar publicação</button>`
+              : `<button type="button" class="wf-btn wf-btn-strategy" onclick="connectDirectorLinkedinPublish(false)">Autorizar publicação LinkedIn</button>`;
             const imgBtn = hasImg
               ? `<button type="button" class="wf-btn wf-btn-approve" onclick="directorPublishCurrentPost(true)">Publicar texto + imagem</button>`
               : "";
@@ -3371,6 +3443,7 @@ def home() -> str:
             "Manter a estratégia actual."
           );
           window.connectDirectorLinkedinPublish = connectDirectorLinkedinPublish;
+          window.clearDirectorPublishAuth = clearDirectorPublishAuth;
           window.directorPublishCurrentPost = directorPublishCurrentPost;
           window.skipPublish = () => directorAction("skip_publish", {}, "Avançar sem publicar agora.");
           window.rejectEngagement = () => directorAction("reject_engagement", {}, "Reprovo este comentário.");
@@ -4659,14 +4732,48 @@ def linkedin_publish_auth_status(payload: LinkedInPublishAuthStatusRequest) -> D
         )
     access_tok = payload.supabase_access_token.strip()
     try:
-        fetch_supabase_auth_user(access_tok, sup_url, sup_anon)
+        user = fetch_supabase_auth_user(access_tok, sup_url, sup_anon)
     except error.HTTPError as exc:
         raise HTTPException(status_code=401, detail="Sessão Supabase inválida ou expirada.") from exc
     except (error.URLError, OSError, json.JSONDecodeError) as exc:
         raise HTTPException(status_code=502, detail=f"Erro ao validar sessão: {exc!s}") from exc
 
+    uid = str(user.get("id") or "").strip()
     row = fetch_user_linkedin_publish_oauth_from_database(access_tok, sup_url, sup_anon)
+    if row:
+        stored_tok = str(row.get("linkedin_access_token") or "").strip()
+        if stored_tok and not get_linkedin_person_urn(stored_tok):
+            if uid:
+                clear_user_linkedin_publish_oauth_from_database(
+                    access_tok, sup_url, sup_anon, uid
+                )
+            row = None
     return publish_oauth_status_for_client(row)
+
+
+@app.post("/agents/linkedin/publish-auth/clear")
+def linkedin_publish_auth_clear(payload: LinkedInPublishAuthStatusRequest) -> Dict[str, Any]:
+    """Apaga autorização de publicação LinkedIn (ex.: token revogado pelo utilizador).
+
+    Argumentos:
+        payload: JWT da sessão Supabase.
+
+    Retorno:
+        ``{"success": true}`` quando limpo ou já inexistente.
+    """
+
+    sup_url, sup_anon = get_supabase_public_credentials()
+    if not sup_url or not sup_anon:
+        raise HTTPException(status_code=503, detail="Supabase não configurado.")
+    access_tok = payload.supabase_access_token.strip()
+    try:
+        user = fetch_supabase_auth_user(access_tok, sup_url, sup_anon)
+    except error.HTTPError as exc:
+        raise HTTPException(status_code=401, detail="Sessão Supabase inválida.") from exc
+    uid = str(user.get("id") or "").strip()
+    if uid:
+        clear_user_linkedin_publish_oauth_from_database(access_tok, sup_url, sup_anon, uid)
+    return {"success": True}
 
 
 @app.post("/agents/linkedin/publish-post")
@@ -4700,27 +4807,34 @@ def linkedin_publish_post(payload: LinkedInPublishPostRequest) -> Dict[str, Any]
     except (error.URLError, OSError, json.JSONDecodeError) as exc:
         raise HTTPException(status_code=502, detail=f"Erro ao validar sessão: {exc!s}") from exc
 
+    uid = str(user.get("id") or "").strip()
     oauth_row = fetch_user_linkedin_publish_oauth_from_database(access_tok, sup_url, sup_anon)
-    publish_tok = ""
     if oauth_row:
-        publish_tok = str(oauth_row.get("linkedin_access_token") or "").strip()
-    if not publish_tok:
-        publish_tok = (payload.linkedin_publish_access_token or "").strip()
+        stored_tok = str(oauth_row.get("linkedin_access_token") or "").strip()
+        if stored_tok and not get_linkedin_person_urn(stored_tok):
+            if uid:
+                clear_user_linkedin_publish_oauth_from_database(
+                    access_tok, sup_url, sup_anon, uid
+                )
+            oauth_row = None
+
+    publish_tok, person_urn = resolve_linkedin_publish_token_and_urn(
+        client_token=(payload.linkedin_publish_access_token or "").strip(),
+        client_person_urn=str(payload.linkedin_person_urn or "").strip(),
+        oauth_row=oauth_row,
+    )
     if not publish_tok:
         raise HTTPException(
             status_code=401,
-            detail=(
-                "Autorização de publicação em falta. Clica em «Autorizar publicação no LinkedIn» "
-                "(o login Supabase OIDC não inclui permissão w_member_social para publicar)."
-            ),
+            detail={
+                "message": (
+                    "Autorização de publicação em falta. Clica em «Autorizar publicação LinkedIn» "
+                    "(permissão w_member_social — é separado do login de análise)."
+                ),
+                "need_reauth": True,
+            },
         )
     access_token_for_api = publish_tok
-
-    person_urn = ""
-    if oauth_row:
-        person_urn = str(oauth_row.get("linkedin_person_urn") or "").strip()
-    if not person_urn:
-        person_urn = str(payload.linkedin_person_urn or "").strip()
     if not person_urn:
         person_urn = get_linkedin_person_urn(access_token_for_api) or ""
 
@@ -4744,10 +4858,13 @@ def linkedin_publish_post(payload: LinkedInPublishPostRequest) -> Dict[str, Any]
     if not person_urn:
         raise HTTPException(
             status_code=401,
-            detail=(
-                "Não foi possível obter o URN do perfil LinkedIn. "
-                "Clica outra vez em «Autorizar publicação LinkedIn»."
-            ),
+            detail={
+                "message": (
+                    "Não foi possível obter o URN do perfil LinkedIn. "
+                    "Clica em «Reautorizar publicação LinkedIn»."
+                ),
+                "need_reauth": True,
+            },
         )
 
     vis = payload.visibility.strip().upper()
@@ -4763,7 +4880,17 @@ def linkedin_publish_post(payload: LinkedInPublishPostRequest) -> Dict[str, Any]
     )
     if not result.get("success"):
         err = str(result.get("error") or "Falha ao publicar no LinkedIn.")
-        status_code = 401 if "LinkedIn API 401" in err or "LinkedIn API 403" in err else 502
+        token_revoked = bool(result.get("token_revoked"))
+        if token_revoked and uid:
+            clear_user_linkedin_publish_oauth_from_database(
+                access_tok, sup_url, sup_anon, uid
+            )
+        status_code = 401 if token_revoked or "LinkedIn API 401" in err else 502
+        if token_revoked:
+            raise HTTPException(
+                status_code=401,
+                detail={"message": err, "need_reauth": True},
+            )
         raise HTTPException(status_code=status_code, detail=err)
     return {
         "success": True,
