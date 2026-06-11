@@ -713,6 +713,32 @@ class LinkedInGeneratePostImageRequest(BaseModel):
     edit_instructions: Optional[str] = Field(None, max_length=4000)
 
 
+class LinkedInFollowedProfilePostsRequest(BaseModel):
+    """Pedido para recolher publicações recentes de um perfil LinkedIn seguido.
+
+    Argumentos:
+        profile_url: URL ``linkedin.com/in/...`` ou ``/company/...``.
+
+    Retorno:
+        Usado pelo endpoint ``POST /agents/linkedin/followed-profile-posts``.
+    """
+
+    profile_url: str = Field(..., min_length=12, description="URL do perfil LinkedIn seguido.")
+
+
+class LinkedInNetworkFeedRequest(BaseModel):
+    """Pedido para tentar importar o feed da rede LinkedIn (ligações).
+
+    Argumentos:
+        linkedin_provider_token: ``session.provider_token`` do login Supabase.
+
+    Retorno:
+        Usado pelo endpoint ``POST /agents/linkedin/network-feed``.
+    """
+
+    linkedin_provider_token: str = Field(..., min_length=20)
+
+
 class LinkedInPublishPostRequest(BaseModel):
     """Pedido para publicar um post gerado no LinkedIn (conta autenticada).
 
@@ -2142,6 +2168,37 @@ def home() -> str:
             white-space: nowrap;
           }
           .cal-status.ready { background: rgba(16, 185, 129, 0.2); color: #6ee7b7; }
+          .cal-status.published { background: rgba(14, 165, 233, 0.25); color: #7dd3fc; }
+          .publish-panel {
+            margin-top: 12px;
+            padding: 14px;
+            border: 1px solid rgba(14, 165, 233, 0.35);
+            border-radius: 12px;
+            background: rgba(15, 23, 42, 0.65);
+          }
+          .publish-panel h4 { margin: 0 0 8px; color: #7dd3fc; }
+          .publish-auth-ok { font-size: 0.78rem; color: #6ee7b7; }
+          .engagement-panel {
+            margin-top: 12px;
+            padding: 14px;
+            border: 1px solid rgba(251, 191, 36, 0.35);
+            border-radius: 12px;
+            background: rgba(69, 26, 3, 0.2);
+          }
+          .engagement-panel h4 { margin: 0 0 8px; color: #fcd34d; }
+          .engagement-comment {
+            width: 100%;
+            min-height: 100px;
+            margin: 8px 0;
+            padding: 10px;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            background: rgba(15, 23, 42, 0.8);
+            color: #e2e8f0;
+            font-family: inherit;
+            font-size: 0.88rem;
+            resize: vertical;
+          }
           .profile-panel {
             margin-top: 12px;
             padding: 12px 14px;
@@ -2396,6 +2453,9 @@ def home() -> str:
               const stored = localStorage.getItem(DIRECTOR_LINKEDIN_PROFILE_KEY) || "";
               if (stored) workflowState.linkedin_profile_url = stored;
               if (hint) hint.textContent = stored ? `Perfil guardado: ${stored}` : "Ligado — clica em «Analisar perfil» para métricas reais.";
+              if (directorLinkedinSession) {
+                void syncDirectorPublishAuthFromServer(directorLinkedinSession);
+              }
             } else if (hint) {
               hint.textContent = "";
             }
@@ -2586,6 +2646,173 @@ def home() -> str:
           window.runDirectorLinkedinAnalysis = runDirectorLinkedinAnalysis;
           window.runDirectorReanalyzeAndOptimize = runDirectorReanalyzeAndOptimize;
 
+          let directorPublishAuthorizedServer = false;
+
+          function getDirectorPublishToken() {
+            try {
+              const tok = sessionStorage.getItem("plataforma_linkedin_publish_token");
+              const exp = parseInt(sessionStorage.getItem("plataforma_linkedin_publish_expires_at") || "0", 10);
+              if (!tok) return null;
+              if (exp && Date.now() > exp) {
+                sessionStorage.removeItem("plataforma_linkedin_publish_token");
+                sessionStorage.removeItem("plataforma_linkedin_publish_person_urn");
+                return null;
+              }
+              return tok;
+            } catch (e) {
+              return null;
+            }
+          }
+
+          function hasDirectorPublishAuth() {
+            return directorPublishAuthorizedServer || !!getDirectorPublishToken();
+          }
+
+          async function syncDirectorPublishAuthFromServer(session) {
+            if (!session || !session.access_token) return false;
+            try {
+              const resp = await fetch("/agents/linkedin/publish-auth/status", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ supabase_access_token: session.access_token }),
+              });
+              const data = await resp.json().catch(() => ({}));
+              if (resp.ok && data.authorized) {
+                directorPublishAuthorizedServer = true;
+                return true;
+              }
+            } catch (e) {}
+            directorPublishAuthorizedServer = false;
+            return false;
+          }
+
+          async function persistDirectorPublishAuthToServer(session) {
+            if (!session || !session.access_token) return false;
+            const publishTok = getDirectorPublishToken();
+            if (!publishTok) return false;
+            let personUrn = "";
+            try {
+              personUrn = sessionStorage.getItem("plataforma_linkedin_publish_person_urn") || "";
+            } catch (e) {}
+            const exp = parseInt(sessionStorage.getItem("plataforma_linkedin_publish_expires_at") || "0", 10);
+            const expiresIn = exp > Date.now() ? Math.floor((exp - Date.now()) / 1000) : 3600;
+            try {
+              const resp = await fetch("/agents/linkedin/publish-auth/store", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  supabase_access_token: session.access_token,
+                  linkedin_publish_access_token: publishTok,
+                  linkedin_person_urn: personUrn || null,
+                  expires_in: expiresIn,
+                }),
+              });
+              if (resp.ok) {
+                directorPublishAuthorizedServer = true;
+                return true;
+              }
+            } catch (e) {}
+            return false;
+          }
+
+          async function connectDirectorLinkedinPublish() {
+            if (!directorLinkedinSession) {
+              alert("Liga o LinkedIn primeiro (botão acima).");
+              return;
+            }
+            if (directorPublishAuthorizedServer || (await syncDirectorPublishAuthFromServer(directorLinkedinSession))) {
+              alert("Publicação no LinkedIn já está autorizada para esta conta.");
+              return;
+            }
+            const returnPath = window.location.pathname || "/";
+            window.location.href =
+              "/agents/linkedin/connect-publish?return_path=" + encodeURIComponent(returnPath);
+          }
+
+          function buildDirectorPublishPostPayload(post, includeImage) {
+            return {
+              id: post.id,
+              title: post.title,
+              body: post.body,
+              hook: post.hook,
+              cta: post.cta,
+              content_type: post.content_type,
+              generated_image_url: includeImage ? (post.generated_image_url || null) : null,
+              image_status: post.image_status || null,
+              status: post.status || "ready",
+            };
+          }
+
+          async function directorPublishCurrentPost(includeImage) {
+            if (!workflowState || !workflowState.post) {
+              alert("Não há post para publicar.");
+              return;
+            }
+            const post = workflowState.post;
+            if (includeImage && !post.generated_image_url) {
+              alert("Este post não tem imagem aprovada.");
+              return;
+            }
+            if (!directorLinkedinSession) {
+              alert("Liga o LinkedIn primeiro.");
+              return;
+            }
+            let publishTok = getDirectorPublishToken();
+            if (!publishTok && !directorPublishAuthorizedServer) {
+              await syncDirectorPublishAuthFromServer(directorLinkedinSession);
+            }
+            publishTok = getDirectorPublishToken();
+            if (!publishTok && !directorPublishAuthorizedServer) {
+              alert("Clica primeiro em «Autorizar publicação LinkedIn».");
+              return;
+            }
+            const modeLabel = includeImage ? "texto + imagem" : "só texto";
+            if (!confirm("Publicar no LinkedIn (" + modeLabel + ")?\n\nSerá usada a tua conta ligada.")) return;
+            const payload = {
+              supabase_access_token: directorLinkedinSession.access_token,
+              linkedin_publish_access_token: publishTok || undefined,
+              include_image: !!includeImage,
+              post: buildDirectorPublishPostPayload(post, includeImage),
+              visibility: "PUBLIC",
+            };
+            try {
+              const resp = await fetch("/agents/linkedin/publish-post", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+              });
+              const data = await resp.json().catch(() => ({}));
+              if (!resp.ok) {
+                const msg = data.detail || data.error || "Falha ao publicar.";
+                throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
+              }
+              await directorAction("mark_published", {
+                post_id: post.id,
+                linkedin_post_urn: data.linkedin_post_urn || "",
+                published_with_image: !!data.published_with_image,
+              }, "Publiquei no LinkedIn.");
+            } catch (err) {
+              const msg = err instanceof Error ? err.message : String(err);
+              addMessage("assistant", "Não consegui publicar: " + msg);
+            }
+          }
+
+          async function processDirectorPublishOAuthReturn() {
+            const q = new URLSearchParams(window.location.search || "");
+            if (q.get("publish_connected") !== "1" && q.get("publish_error") !== "1") return;
+            if (q.get("publish_error") === "1") {
+              addMessage("assistant", "A autorização de publicação LinkedIn falhou. Tenta outra vez.");
+            }
+            if (q.get("publish_connected") === "1" && directorLinkedinSession) {
+              await persistDirectorPublishAuthToServer(directorLinkedinSession);
+              addMessage("assistant", "Publicação no LinkedIn autorizada. Já podes publicar o post no painel.");
+            }
+            q.delete("publish_connected");
+            q.delete("publish_error");
+            const qs = q.toString();
+            window.history.replaceState({}, "", window.location.pathname + (qs ? "?" + qs : ""));
+          }
+
           function buildPayload(extra = {}) {
             if (!workflowState) workflowState = {};
             workflowState.linkedin_connected = Boolean(
@@ -2701,8 +2928,9 @@ def home() -> str:
               const post = entry.post || {};
               const status = entry.status || "draft";
               const isActive = activePostId && String(entry.post_id) === String(activePostId);
-              const cls = `cal-row${status === "ready" ? " is-ready" : ""}${isActive ? " is-active" : ""}`;
-              const statusLabel = status === "ready" ? "Pronto" : "Rascunho";
+              const cls = `cal-row${status === "ready" ? " is-ready" : ""}${status === "published" ? " is-ready" : ""}${isActive ? " is-active" : ""}`;
+              const statusLabel = status === "published" ? "Publicado" : status === "ready" ? "Pronto" : "Rascunho";
+              const statusClass = status === "published" ? "published" : status === "ready" ? "ready" : "";
               const pillar = entry.pillar_theme ? ` · ${entry.pillar_theme}` : "";
               return `<div class="${cls}">
                 <div>
@@ -2710,8 +2938,8 @@ def home() -> str:
                   <div class="cal-title">${escapeHtml(post.title || "Post LinkedIn")}</div>
                 </div>
                 <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px">
-                  <span class="cal-status ${status === "ready" ? "ready" : ""}">${escapeHtml(statusLabel)}</span>
-                  ${status !== "ready" ? `<button type="button" class="wf-btn wf-btn-strategy" style="padding:6px 10px;font-size:0.75rem" onclick='selectCalendarPost(${JSON.stringify(String(entry.post_id || ""))})'>Rever</button>` : ""}
+                  <span class="cal-status ${statusClass}">${escapeHtml(statusLabel)}</span>
+                  ${status === "draft" ? `<button type="button" class="wf-btn wf-btn-strategy" style="padding:6px 10px;font-size:0.75rem" onclick='selectCalendarPost(${JSON.stringify(String(entry.post_id || ""))})'>Rever</button>` : ""}
                 </div>
               </div>`;
             }).join("");
@@ -2786,6 +3014,125 @@ def home() -> str:
               </div>`;
           }
 
+          function renderPublishPanel(post, mode) {
+            if (!post) return "";
+            if (post.published_on_linkedin) {
+              return `
+                <div class="publish-panel">
+                  <h4>Publicado no LinkedIn</h4>
+                  <p class="post-meta">${post.published_with_image ? "Com imagem" : "Só texto"}</p>
+                  ${post.linkedin_post_urn ? `<p class="post-meta">ID: ${escapeHtml(String(post.linkedin_post_urn))}</p>` : ""}
+                </div>`;
+            }
+            if (mode !== "publish_confirm") return "";
+            const hasImg = !!(post.generated_image_url);
+            const authHtml = hasDirectorPublishAuth()
+              ? `<span class="publish-auth-ok">Publicação autorizada</span>`
+              : `<button type="button" class="wf-btn wf-btn-strategy" onclick="connectDirectorLinkedinPublish()">Autorizar publicação LinkedIn</button>`;
+            const imgBtn = hasImg
+              ? `<button type="button" class="wf-btn wf-btn-approve" onclick="directorPublishCurrentPost(true)">Publicar texto + imagem</button>`
+              : "";
+            return `
+              <div class="publish-panel">
+                <h4>Publicar no LinkedIn</h4>
+                <p class="post-meta">O login acima analisa o perfil; autoriza aqui para publicar posts (permissão w_member_social).</p>
+                <div class="workflow-actions" style="flex-wrap:wrap;align-items:center;gap:8px">
+                  ${authHtml}
+                  <button type="button" class="wf-btn wf-btn-approve" onclick="directorPublishCurrentPost(false)">Publicar só texto</button>
+                  ${imgBtn}
+                  <button type="button" class="wf-btn wf-btn-secondary" onclick="skipPublish()">Avançar sem publicar</button>
+                </div>
+              </div>`;
+          }
+
+          function renderFollowedFeedPanel(profiles, queue, suggestions, mode) {
+            const profs = Array.isArray(profiles) ? profiles : [];
+            const posts = Array.isArray(queue) ? queue : [];
+            const sugs = (Array.isArray(suggestions) ? suggestions : [])
+              .filter((s) => (s.status || "pending") === "pending");
+            const sugRows = sugs.map((s) => `
+              <div class="cal-row" style="margin-bottom:6px">
+                <div>
+                  <div class="cal-meta">${escapeHtml(s.display_name || "")}</div>
+                  <div class="cal-title" style="font-size:0.8rem">${escapeHtml(s.rationale || "")}</div>
+                  <a href="${escapeHtml(s.profile_url || "#")}" target="_blank" rel="noopener" style="font-size:0.75rem;color:#93c5fd">Ver perfil</a>
+                </div>
+                <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">
+                  <button type="button" class="wf-btn wf-btn-approve" style="padding:4px 8px;font-size:0.7rem"
+                    onclick='acceptFollowedSuggestion(${JSON.stringify(String(s.id || ""))})'>Adicionar</button>
+                  <button type="button" class="wf-btn wf-btn-secondary" style="padding:4px 8px;font-size:0.7rem"
+                    onclick='dismissFollowedSuggestion(${JSON.stringify(String(s.id || ""))})'>Ignorar</button>
+                </div>
+              </div>`).join("");
+            const profRows = profs.map((p) => `
+              <li>${escapeHtml(p.display_name || p.profile_url || "")}
+                <button type="button" class="wf-btn wf-btn-secondary" style="padding:2px 8px;font-size:0.7rem;margin-left:6px"
+                  onclick='removeFollowedProfile(${JSON.stringify(String(p.id || ""))})'>Remover</button>
+              </li>`).join("");
+            const statusLabel = { pending: "Pendente", draft: "Em revisão", approved: "Aprovado", rejected: "Reprovado" };
+            const postRows = posts.map((entry) => {
+              const st = entry.status || "pending";
+              const cls = st === "pending" ? "" : " is-ready";
+              const snippet = String(entry.snippet || "").slice(0, 120);
+              return `<div class="cal-row${cls}">
+                <div>
+                  <div class="cal-meta">${escapeHtml(entry.author_name || "")}</div>
+                  <div class="cal-title">${escapeHtml(snippet || "Publicação")}${snippet.length >= 120 ? "…" : ""}</div>
+                </div>
+                <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px">
+                  <span class="cal-status">${escapeHtml(statusLabel[st] || st)}</span>
+                  ${st === "pending" ? `<button type="button" class="wf-btn wf-btn-strategy" style="padding:6px 10px;font-size:0.75rem"
+                    onclick='selectFollowedPost(${JSON.stringify(String(entry.id || ""))})'>Sugerir comentário</button>` : ""}
+                  ${entry.post_url ? `<a href="${escapeHtml(entry.post_url)}" target="_blank" rel="noopener" style="font-size:0.75rem;color:#93c5fd">Abrir</a>` : ""}
+                </div>
+              </div>`;
+            }).join("");
+            return `
+              <div class="calendar-panel" style="border-color:rgba(251,191,36,0.35)">
+                <h4>Comentar publicações de perfis que sigo</h4>
+                <p class="post-meta">Sugiro perfis com base na tua estratégia/ICP — confirmas antes de adicionar. Depois recolho posts públicos (Apify) e proponho comentários para aprovares.</p>
+                <div class="workflow-actions" style="margin-bottom:10px;flex-wrap:wrap">
+                  <button type="button" class="wf-btn wf-btn-strategy" onclick="suggestFollowedProfiles()">Sugerir perfis (ICP)</button>
+                  <button type="button" class="wf-btn wf-btn-secondary" onclick="syncLinkedInNetworkFeed()">Importar feed</button>
+                  <button type="button" class="wf-btn wf-btn-strategy" onclick="promptAddFollowedProfile()">+ URL manual</button>
+                  <button type="button" class="wf-btn wf-btn-secondary" onclick="refreshFollowedPosts()">Actualizar publicações</button>
+                </div>
+                ${sugRows ? `<div style="margin-bottom:10px"><h5 style="margin:0 0 6px;font-size:0.85rem">Sugestões (confirma)</h5>${sugRows}
+                  <button type="button" class="wf-btn wf-btn-approve" style="margin-top:6px;padding:6px 10px;font-size:0.75rem" onclick="acceptAllFollowedSuggestions()">Adicionar todas</button></div>` : ""}
+                ${profRows ? `<ul class="strategy-list">${profRows}</ul>` : "<p class=\"post-meta\">Ainda não adicionaste perfis.</p>"}
+                ${postRows ? `<div style="margin-top:10px">${postRows}</div>` : ""}
+              </div>`;
+          }
+
+          function renderEngagementPanel(draft, mode) {
+            if (!draft || !draft.comment_body) {
+              if (mode !== "engagement_review") return "";
+              return `<div class="engagement-panel"><p class="post-meta">A gerar comentário para a publicação…</p></div>`;
+            }
+            const openPost = draft.target_url
+              ? `<a class="wf-btn wf-btn-approve" style="display:inline-block;text-decoration:none;margin-bottom:8px"
+                  href="${escapeHtml(draft.target_url)}" target="_blank" rel="noopener">Abrir publicação no LinkedIn</a>`
+              : "";
+            const actions = mode === "engagement_review" ? `
+              <div class="workflow-actions">
+                <button type="button" class="wf-btn wf-btn-approve" onclick="approveEngagement()">Aprovar comentário</button>
+                <button type="button" class="wf-btn wf-btn-secondary" onclick="rejectEngagement()">Reprovar</button>
+                <button type="button" class="wf-btn wf-btn-secondary" onclick="copyEngagementToClipboard()">Copiar texto</button>
+                <button type="button" class="wf-btn wf-btn-image" onclick="regenerateEngagement()">Refazer</button>
+              </div>` : "";
+            return `
+              <div class="engagement-panel">
+                <h4>Comentário para publicação de terceiro</h4>
+                <p class="post-meta">${escapeHtml(draft.target_label || "")}</p>
+                ${draft.target_snippet ? `<p class="post-meta" style="font-style:italic">«${escapeHtml(String(draft.target_snippet).slice(0, 200))}»</p>` : ""}
+                ${openPost}
+                ${draft.angle ? `<p class="post-meta">${escapeHtml(draft.angle)}</p>` : ""}
+                <textarea id="directorEngagementBody" class="engagement-comment">${escapeHtml(draft.comment_body || "")}</textarea>
+                <p class="post-meta">Depois de aprovar: copia o texto, abre a publicação e cola o comentário.</p>
+                ${actions}
+              </div>`;
+          }
+
           function renderProfilePanel(snapshot) {
             if (!snapshot || !snapshot.profile_url) return "";
             const metrics = snapshot.metricas_linkedin || {};
@@ -2817,6 +3164,14 @@ def home() -> str:
             const image = deliverables.image || (workflowState && workflowState.image) || null;
             const optimizationReport = deliverables.optimization_report
               || (workflowState && workflowState.optimization_report) || null;
+            const engagementDraft = deliverables.engagement_draft
+              || (workflowState && workflowState.engagement_draft) || null;
+            const followedProfiles = deliverables.followed_profiles
+              || (workflowState && workflowState.followed_profiles) || [];
+            const followedSuggestions = deliverables.followed_profile_suggestions
+              || (workflowState && workflowState.followed_profile_suggestions) || [];
+            const followedPostsQueue = deliverables.followed_posts_queue
+              || (workflowState && workflowState.followed_posts_queue) || [];
             const activePostId = post && post.id ? post.id : null;
             const stageLabel = {
               strategy_brief: "Brief estratégico",
@@ -2828,6 +3183,9 @@ def home() -> str:
               copy_review: "Revisão de copy",
               image_confirm: "Confirmar imagem",
               image_review: "Revisão de imagem",
+              publish_confirm: "Publicar no LinkedIn",
+              engagement_review: "Comentário (aprovação)",
+              followed_feed: "Publicações de perfis seguidos",
               completed: "Concluído",
               redirect: "Encaminhamento",
               idle: "Início"
@@ -2844,7 +3202,10 @@ def home() -> str:
                 : "Passo 1 de 2: revê o texto, edita se precisares e clica em «Aprovar copy».",
               image_confirm: "Passo 2 de 2: copy aprovada. Queres o criativo visual?",
               image_review: "Revê a imagem. Aprova ou regenera com novas instruções.",
-              completed: "Copy e imagem concluídos.",
+              publish_confirm: "Autoriza a publicação OAuth e publica o post, ou avança sem publicar.",
+              engagement_review: "Comentário para uma publicação de alguém que segues — aprova ou reprova.",
+              followed_feed: "Escolhe uma publicação para eu sugerir um comentário.",
+              completed: "Semana ou post concluídos. Podes comentar em perfis que segues ou reanalisar.",
               redirect: "Este pedido é do agente especializado — continua na página dele.",
               idle: "Começa por definir a tua estratégia LinkedIn ou pede copy/imagem."
             }[mode] || "";
@@ -2852,8 +3213,11 @@ def home() -> str:
             let workflowHtml = renderProfilePanel(linkedinAnalysis)
               + renderStrategyPanel(strategy, mode)
               + renderOptimizationPanel(optimizationReport, mode)
-              + renderCalendarPanel(calendar, activePostId);
-            if (post && post.body) {
+              + renderCalendarPanel(calendar, activePostId)
+              + renderPublishPanel(post, mode)
+              + renderFollowedFeedPanel(followedProfiles, followedPostsQueue, followedSuggestions, mode)
+              + renderEngagementPanel(engagementDraft, mode);
+            if (post && post.body && mode !== "engagement_review") {
               const readonly = mode !== "copy_review";
               const metaParts = [];
               if (post.title) metaParts.push(`Título: ${post.title}`);
@@ -2958,6 +3322,131 @@ def home() -> str:
             {},
             "Manter a estratégia actual."
           );
+          window.connectDirectorLinkedinPublish = connectDirectorLinkedinPublish;
+          window.directorPublishCurrentPost = directorPublishCurrentPost;
+          window.skipPublish = () => directorAction("skip_publish", {}, "Avançar sem publicar agora.");
+          window.rejectEngagement = () => directorAction("reject_engagement", {}, "Reprovo este comentário.");
+          window.selectFollowedPost = (postId) => directorAction(
+            "select_followed_post",
+            { post_id: postId },
+            "Quero um comentário para esta publicação."
+          );
+          window.promptAddFollowedProfile = () => {
+            const url = window.prompt("URL do perfil LinkedIn que segues (ex.: https://linkedin.com/in/nome):") || "";
+            if (!url.trim()) return;
+            const name = window.prompt("Nome para mostrar (opcional):") || "";
+            directorAction("add_followed_profile", {
+              profile_url: url.trim(),
+              display_name: name.trim() || undefined,
+            }, "Adicionar perfil seguido.");
+          };
+          window.removeFollowedProfile = (profileId) => directorAction(
+            "remove_followed_profile",
+            { profile_id: profileId },
+            "Remover perfil da lista."
+          );
+          window.suggestFollowedProfiles = () => directorAction(
+            "suggest_followed_profiles",
+            { count: 5 },
+            "Sugerir perfis LinkedIn alinhados com a minha estratégia e ICP."
+          );
+          window.acceptFollowedSuggestion = (suggestionId) => directorAction(
+            "accept_followed_suggestions",
+            { suggestion_ids: [suggestionId] },
+            "Adicionar este perfil sugerido."
+          );
+          window.acceptAllFollowedSuggestions = () => directorAction(
+            "accept_followed_suggestions",
+            { accept_all: true },
+            "Adicionar todas as sugestões de perfis."
+          );
+          window.dismissFollowedSuggestion = (suggestionId) => directorAction(
+            "dismiss_followed_suggestion",
+            { suggestion_id: suggestionId },
+            "Ignorar sugestão de perfil."
+          );
+          async function syncLinkedInNetworkFeed() {
+            if (!directorLinkedinSession || !directorLinkedinSession.provider_token) {
+              alert("Liga o LinkedIn primeiro (login no painel) para tentar importar o feed.");
+              return;
+            }
+            const hint = document.getElementById("linkedinProfileHint");
+            if (hint) hint.textContent = "A tentar importar o teu feed LinkedIn…";
+            try {
+              const resp = await fetch("/agents/linkedin/network-feed", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  linkedin_provider_token: directorLinkedinSession.provider_token,
+                }),
+              });
+              const data = await resp.json();
+              if (hint) hint.textContent = "";
+              if (resp.ok && data.success && Array.isArray(data.posts) && data.posts.length) {
+                await directorAction("merge_followed_posts", {
+                  posts: data.posts,
+                  auto_add_profiles: true,
+                  feed_message: data.message || "Feed importado.",
+                }, "Importar publicações do feed LinkedIn.");
+                return;
+              }
+              const msg = (data && data.message) || "A LinkedIn não autorizou ler o feed desta app.";
+              alert(msg + "\\n\\nAdiciona manualmente o URL de perfis que segues (botão «+ Adicionar perfil»).");
+            } catch (e) {
+              if (hint) hint.textContent = "";
+              alert("Não foi possível importar o feed. Adiciona perfis manualmente.");
+            }
+          }
+          window.syncLinkedInNetworkFeed = syncLinkedInNetworkFeed;
+          async function refreshFollowedPosts() {
+            if (!workflowState) workflowState = {};
+            const profiles = workflowState.followed_profiles || [];
+            if (!profiles.length) {
+              alert("Adiciona pelo menos um perfil LinkedIn ou tenta «Importar do meu feed».");
+              return;
+            }
+            const hint = document.getElementById("linkedinProfileHint");
+            if (hint) hint.textContent = "A recolher publicações dos perfis guardados…";
+            const collected = [];
+            for (const prof of profiles) {
+              const url = prof.profile_url;
+              if (!url) continue;
+              try {
+                const resp = await fetch("/agents/linkedin/followed-profile-posts", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ profile_url: url }),
+                });
+                const data = await resp.json();
+                if (resp.ok && Array.isArray(data.posts)) {
+                  collected.push(...data.posts);
+                }
+              } catch (e) {}
+            }
+            if (hint) hint.textContent = "";
+            await directorAction("merge_followed_posts", { posts: collected }, "Actualizei as publicações dos perfis guardados.");
+          }
+          window.refreshFollowedPosts = refreshFollowedPosts;
+          window.approveEngagement = () => {
+            const el = document.getElementById("directorEngagementBody");
+            const comment_body = el ? el.value.trim() : "";
+            directorAction("approve_engagement", { comment_body }, "Aprovo o comentário sugerido.");
+          };
+          window.regenerateEngagement = () => {
+            const instr = window.prompt("O que queres mudar no comentário? (opcional)") || "";
+            directorAction("regenerate_engagement", { edit_instructions: instr }, "Refazer comentário.");
+          };
+          window.copyEngagementToClipboard = async () => {
+            const el = document.getElementById("directorEngagementBody");
+            const text = el ? el.value.trim() : "";
+            if (!text) return;
+            try {
+              await navigator.clipboard.writeText(text);
+              alert("Comentário copiado — cola no LinkedIn.");
+            } catch (e) {
+              alert("Não foi possível copiar automaticamente. Selecciona e copia o texto.");
+            }
+          };
 
           async function sendMessage() {
             const content = chatInput.value.trim();
@@ -2981,7 +3470,8 @@ def home() -> str:
           (async function bootstrapDirectorPage() {
             await initDirectorSupabaseFromUrl();
             await refreshDirectorLinkedinAuth();
-            if (workflowState && (workflowState.strategy || workflowState.linkedin_analysis || workflowState.linkedin_calendar || workflowState.optimization_report)) {
+            await processDirectorPublishOAuthReturn();
+            if (workflowState && (workflowState.strategy || workflowState.linkedin_analysis || workflowState.linkedin_calendar || workflowState.optimization_report || workflowState.followed_profiles || workflowState.followed_profile_suggestions)) {
               renderDirectorPanel({
                 orchestration_mode: workflowState.stage || "idle",
                 execution_plan: workflowState.execution_plan || "",
@@ -2990,6 +3480,10 @@ def home() -> str:
                   linkedin_analysis: workflowState.linkedin_analysis,
                   linkedin_calendar: workflowState.linkedin_calendar,
                   optimization_report: workflowState.optimization_report,
+                  engagement_draft: workflowState.engagement_draft,
+                  followed_profiles: workflowState.followed_profiles,
+                  followed_profile_suggestions: workflowState.followed_profile_suggestions,
+                  followed_posts_queue: workflowState.followed_posts_queue,
                   post: workflowState.post,
                   image: workflowState.image,
                 },
@@ -3656,6 +4150,83 @@ def _slim_linkedin_analysis_for_post_generation(analysis: Dict[str, Any]) -> Dic
     if isinstance(ppd, dict):
         slim["public_profile_data"] = _slim_linkedin_profile_for_post_generation(ppd)
     return slim
+
+@app.post("/agents/linkedin/followed-profile-posts")
+def linkedin_followed_profile_posts(payload: LinkedInFollowedProfilePostsRequest) -> Dict[str, Any]:
+    """Recolhe publicações recentes de um perfil que o utilizador segue.
+
+    Usado pelo Diretor para sugerir comentários em publicações de terceiros
+    (não nas publicações do próprio utilizador).
+
+    Argumentos:
+        payload: URL do perfil LinkedIn.
+
+    Retorno:
+        ``{"profile_url", "display_name", "posts": [...]}`` para a fila do Diretor.
+
+    Raises:
+        HTTPException: 422 URL inválido; 503 sem Apify; 502 falha na recolha.
+    """
+
+    from agents.director_follow_feed import posts_from_apify_bundle, slug_from_linkedin_profile_url
+
+    raw_url = str(payload.profile_url or "").strip()
+    profile_url = canonicalize_linkedin_profile_url(raw_url) if raw_url else ""
+    if not profile_url or "linkedin.com" not in profile_url.casefold():
+        raise HTTPException(status_code=422, detail="URL LinkedIn inválido.")
+
+    apify_token = os.getenv("APIFY_API_TOKEN", "").strip()
+    if not apify_token:
+        raise HTTPException(
+            status_code=503,
+            detail="APIFY_API_TOKEN em falta — necessário para recolher publicações de perfis seguidos.",
+        )
+    try:
+        bundle = _fetch_linkedin_public_profile_with_apify(profile_url)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    display_name = slug_from_linkedin_profile_url(profile_url)
+    posts = posts_from_apify_bundle(
+        bundle,
+        profile_url=profile_url,
+        author_name=display_name,
+        limit=5,
+    )
+    return {
+        "profile_url": profile_url,
+        "display_name": display_name,
+        "posts": posts,
+        "count": len(posts),
+    }
+
+
+@app.post("/agents/linkedin/network-feed")
+def linkedin_network_feed(payload: LinkedInNetworkFeedRequest) -> Dict[str, Any]:
+    """Tenta importar publicações do feed da rede LinkedIn (quem segues/ligações).
+
+    A API oficial só funciona se a app LinkedIn tiver permissões alargadas;
+    com login OIDC standard costuma falhar — nesse caso usa perfis manuais + Apify.
+
+    Argumentos:
+        payload: ``provider_token`` da sessão Supabase.
+
+    Retorno:
+        ``{success, posts, message, api_available, count}``.
+    """
+
+    from agents.linkedin_network_feed import fetch_linkedin_network_feed_posts
+
+    result = fetch_linkedin_network_feed_posts(payload.linkedin_provider_token)
+    posts = result.get("posts") if isinstance(result.get("posts"), list) else []
+    return {
+        "success": bool(result.get("success")),
+        "posts": posts,
+        "message": str(result.get("message") or ""),
+        "api_available": bool(result.get("api_available")),
+        "count": len(posts),
+    }
+
 
 @app.post("/agents/linkedin/generate-posts")
 def linkedin_generate_posts(payload: LinkedInGeneratePostsRequest) -> Dict[str, Any]:

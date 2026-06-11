@@ -16,11 +16,27 @@ from openai import OpenAI
 
 from agents.copywriter import copywriter_agent
 from agents.designer import designer_agent
+from agents.director_engagement import (
+    append_approved_engagement,
+    generate_comment_for_followed_post,
+)
+from agents.director_follow_feed import (
+    find_followed_post,
+    merge_posts_into_queue,
+    next_pending_followed_post,
+    normalize_followed_profile,
+    update_followed_post_status,
+)
 from agents.director_linkedin import (
     editor_post_from_linkedin,
     generate_director_linkedin_posts,
     profile_context_markdown,
     regenerate_director_linkedin_post,
+)
+from agents.director_publish import (
+    attach_approved_image_to_post,
+    mark_post_published,
+    sync_calendar_post_data,
 )
 from agents.director_optimization import (
     apply_optimization_to_strategy,
@@ -51,6 +67,9 @@ STAGE_PLANNING = "planning"
 STAGE_COPY_REVIEW = "copy_review"
 STAGE_IMAGE_CONFIRM = "image_confirm"
 STAGE_IMAGE_REVIEW = "image_review"
+STAGE_PUBLISH_CONFIRM = "publish_confirm"
+STAGE_ENGAGEMENT_REVIEW = "engagement_review"
+STAGE_FOLLOWED_FEED = "followed_feed"
 STAGE_COMPLETED = "completed"
 
 ACTION_APPROVE_STRATEGY = "approve_strategy"
@@ -67,6 +86,20 @@ ACTION_GENERATE_IMAGE = "generate_image"
 ACTION_SKIP_IMAGE = "skip_image"
 ACTION_APPROVE_IMAGE = "approve_image"
 ACTION_REGENERATE_IMAGE = "regenerate_image"
+ACTION_SKIP_PUBLISH = "skip_publish"
+ACTION_MARK_PUBLISHED = "mark_published"
+ACTION_ADD_FOLLOWED_PROFILE = "add_followed_profile"
+ACTION_REMOVE_FOLLOWED_PROFILE = "remove_followed_profile"
+ACTION_SUGGEST_FOLLOWED_PROFILES = "suggest_followed_profiles"
+ACTION_ACCEPT_FOLLOWED_SUGGESTIONS = "accept_followed_suggestions"
+ACTION_DISMISS_FOLLOWED_SUGGESTION = "dismiss_followed_suggestion"
+ACTION_MERGE_FOLLOWED_POSTS = "merge_followed_posts"
+ACTION_SELECT_FOLLOWED_POST = "select_followed_post"
+ACTION_GENERATE_ENGAGEMENT = "generate_engagement"
+ACTION_APPROVE_ENGAGEMENT = "approve_engagement"
+ACTION_REJECT_ENGAGEMENT = "reject_engagement"
+ACTION_REGENERATE_ENGAGEMENT = "regenerate_engagement"
+ACTION_SKIP_ENGAGEMENT = "skip_engagement"
 ACTION_START_CAMPAIGN = "start_campaign"
 
 DIRECTOR_INTERNAL_AGENTS = ("Agente Copywriter", "Agente Designer")
@@ -128,6 +161,12 @@ def _new_workflow_state() -> Dict[str, Any]:
         "post": None,
         "copy": None,
         "image": None,
+        "followed_profiles": [],
+        "followed_profile_suggestions": [],
+        "followed_posts_queue": [],
+        "active_followed_post_id": "",
+        "engagement_draft": None,
+        "engagement_log": [],
         "pending_actions": [],
     }
 
@@ -150,6 +189,9 @@ def normalize_workflow_state(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         STAGE_COPY_REVIEW,
         STAGE_IMAGE_CONFIRM,
         STAGE_IMAGE_REVIEW,
+        STAGE_PUBLISH_CONFIRM,
+        STAGE_ENGAGEMENT_REVIEW,
+        STAGE_FOLLOWED_FEED,
         STAGE_COMPLETED,
     }:
         state["stage"] = stage
@@ -179,6 +221,19 @@ def normalize_workflow_state(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         state["copy"] = raw["copy"]
     if isinstance(raw.get("image"), dict):
         state["image"] = raw["image"]
+    profiles = raw.get("followed_profiles")
+    state["followed_profiles"] = profiles if isinstance(profiles, list) else []
+    suggestions = raw.get("followed_profile_suggestions")
+    state["followed_profile_suggestions"] = (
+        suggestions if isinstance(suggestions, list) else []
+    )
+    queue = raw.get("followed_posts_queue")
+    state["followed_posts_queue"] = queue if isinstance(queue, list) else []
+    state["active_followed_post_id"] = str(raw.get("active_followed_post_id") or "").strip()
+    if isinstance(raw.get("engagement_draft"), dict):
+        state["engagement_draft"] = raw["engagement_draft"]
+    log = raw.get("engagement_log")
+    state["engagement_log"] = log if isinstance(log, list) else []
     actions = raw.get("pending_actions")
     state["pending_actions"] = actions if isinstance(actions, list) else []
     return state
@@ -374,6 +429,22 @@ def _build_linkedin_director_response(
             "ter métricas reais. Em seguida descreve os teus objetivos e monto a estratégia."
         )
         state["pending_actions"] = [ACTION_ANALYZE_LINKEDIN]
+    elif state.get("stage") == STAGE_PUBLISH_CONFIRM:
+        reply = (
+            "Estás na etapa de **publicação**. Usa os botões no painel: autoriza o LinkedIn, "
+            "publica o post ou avança sem publicar."
+        )
+        state["pending_actions"] = [ACTION_SKIP_PUBLISH]
+    elif state.get("stage") in {STAGE_ENGAGEMENT_REVIEW, STAGE_FOLLOWED_FEED}:
+        reply = (
+            "Gere comentários para **publicações de perfis que segues**. "
+            "Adiciona perfis, actualiza o feed e escolhe uma publicação — "
+            "aprovas ou reprovas o comentário antes de ir comentar no LinkedIn."
+        )
+        state["pending_actions"] = [
+            ACTION_SELECT_FOLLOWED_POST,
+            ACTION_GENERATE_ENGAGEMENT,
+        ]
     else:
         reply = (
             "Perfil LinkedIn já analisado. Descreve os teus objetivos (o que quiseres "
@@ -436,6 +507,12 @@ def _deliverables_from_state(state: Dict[str, Any]) -> Dict[str, Any]:
         "post": state.get("post"),
         "copy": state.get("copy"),
         "image": state.get("image"),
+        "followed_profiles": state.get("followed_profiles") or [],
+        "followed_profile_suggestions": state.get("followed_profile_suggestions") or [],
+        "followed_posts_queue": state.get("followed_posts_queue") or [],
+        "active_followed_post_id": state.get("active_followed_post_id") or "",
+        "engagement_draft": state.get("engagement_draft"),
+        "engagement_log": state.get("engagement_log") or [],
     }
 
 
@@ -538,46 +615,145 @@ def _sync_calendar_entry(
     state["linkedin_calendar"] = calendar
 
 
-def _advance_after_post_packaged(state: Dict[str, Any]) -> str:
-    """Marca post do calendário como pronto e indica próximo passo.
+def _package_post_ready(state: Dict[str, Any]) -> None:
+    """Marca o post activo como pronto (copy + imagem aprovadas)."""
+
+    post = dict(state.get("post") or {})
+    image = state.get("image") if isinstance(state.get("image"), dict) else None
+    post = attach_approved_image_to_post(post, image)
+    post["status"] = "ready"
+    state["post"] = post
+    post_id = str(post.get("id") or "")
+    if post_id:
+        _sync_calendar_entry(state, post_id, post, status="ready")
+
+
+def _enter_publish_confirm(state: Dict[str, Any]) -> str:
+    """Prepara etapa de publicação LinkedIn no painel do Diretor.
 
     Argumentos:
         state: Estado mutável do workflow.
 
     Retorno:
-        Mensagem ao utilizador sobre progresso da semana.
+        Mensagem ao utilizador.
     """
-
-    post = state.get("post") or {}
-    post_id = str(post.get("id") or "")
-    if post_id:
-        packaged = dict(post)
-        packaged["status"] = "ready"
-        state["post"] = packaged
-        _sync_calendar_entry(state, post_id, packaged, status="ready")
 
     state["image"] = None
     state["copy"] = None
+    state["stage"] = STAGE_PUBLISH_CONFIRM
+    state["pending_actions"] = [ACTION_SKIP_PUBLISH]
+    has_image = bool((state.get("post") or {}).get("generated_image_url"))
+    if has_image:
+        return (
+            "Pacote aprovado. Autoriza a publicação no LinkedIn (se ainda não fizeste) "
+            "e clica em «Publicar» no painel — texto + imagem ou só texto. "
+            "Também podes avançar sem publicar agora."
+        )
+    return (
+        "Copy aprovada. Autoriza e publica no LinkedIn no painel, "
+        "ou avança sem publicar para o próximo passo."
+    )
+
+
+def _start_comment_review_for_followed_post(
+    *,
+    client: OpenAI,
+    model: str,
+    state: Dict[str, Any],
+    language: str,
+    followed_post: Dict[str, Any],
+) -> str:
+    """Gera comentário para uma publicação de perfil seguido.
+
+    Argumentos:
+        client: Cliente OpenAI.
+        model: Modelo LLM.
+        state: Estado do workflow.
+        language: Idioma.
+        followed_post: Post da fila (autor, URL, texto).
+
+    Retorno:
+        Mensagem ao utilizador.
+    """
+
+    draft = generate_comment_for_followed_post(
+        client, model, state, followed_post, language
+    )
+    state["engagement_draft"] = draft
+    state["active_followed_post_id"] = str(followed_post.get("id") or "")
+    queue = update_followed_post_status(
+        state.get("followed_posts_queue") or [],
+        str(followed_post.get("id") or ""),
+        "draft",
+    )
+    state["followed_posts_queue"] = queue
+    state["stage"] = STAGE_ENGAGEMENT_REVIEW
+    state["pending_actions"] = [
+        ACTION_APPROVE_ENGAGEMENT,
+        ACTION_REJECT_ENGAGEMENT,
+        ACTION_REGENERATE_ENGAGEMENT,
+    ]
+    author = str(followed_post.get("author_name") or "autor")
+    return (
+        f"Sugeri um comentário para a publicação de **{author}**. "
+        "Revê no painel — aprova para copiar e ir comentar, ou reprova."
+    )
+
+
+def _advance_calendar_or_complete(state: Dict[str, Any]) -> str:
+    """Avança no calendário após publicar, saltar ou engagement concluído.
+
+    Argumentos:
+        state: Estado mutável do workflow.
+
+    Retorno:
+        Mensagem de progresso.
+    """
+
+    state["engagement_draft"] = None
     calendar = state.get("linkedin_calendar") or []
     if not calendar:
         state["stage"] = STAGE_COMPLETED
         state["pending_actions"] = []
-        return "Pacote do post concluído."
+        state["post"] = None
+        return "Fluxo concluído."
 
-    ready_count = sum(1 for e in calendar if e.get("status") == "ready")
+    done_statuses = frozenset({"ready", "published"})
+    done_count = sum(
+        1 for e in calendar if isinstance(e, dict) and e.get("status") in done_statuses
+    )
+    published_count = sum(
+        1 for e in calendar if isinstance(e, dict) and e.get("status") == "published"
+    )
     total = len(calendar)
-    if ready_count >= total:
+
+    pending = [
+        e for e in calendar
+        if isinstance(e, dict) and str(e.get("status") or "draft") == "draft"
+    ]
+    if not pending and done_count >= total:
         state["stage"] = STAGE_COMPLETED
         state["pending_actions"] = []
-        return f"Semana concluída — {total} posts revistos e prontos no calendário."
+        state["post"] = None
+        return (
+            f"Semana concluída — {total} posts processados "
+            f"({published_count} publicados no LinkedIn)."
+        )
 
     state["stage"] = STAGE_POSTS_REVIEW
     state["pending_actions"] = [ACTION_SELECT_POST]
     state["post"] = None
     return (
-        f"Post concluído ({ready_count}/{total}). "
-        "Escolhe o próximo dia no calendário abaixo."
+        f"Progresso: {done_count}/{total} posts. "
+        "Escolhe o próximo dia no calendário."
     )
+
+
+def _advance_after_post_packaged(state: Dict[str, Any]) -> str:
+    """Marca post pronto e abre etapa de publicação (Fase D)."""
+
+    _package_post_ready(state)
+    return _enter_publish_confirm(state)
 
 
 def _select_calendar_post(state: Dict[str, Any], post_id: str) -> bool:
@@ -999,6 +1175,350 @@ def process_director_turn(
         base_response["deliverables"] = _deliverables_from_state(state)
         return base_response
 
+    # --- Publicação e engagement LinkedIn (Fase D) ---
+    if action == ACTION_MARK_PUBLISHED:
+        post_id = str(payload.get("post_id") or (state.get("post") or {}).get("id") or "")
+        urn = str(payload.get("linkedin_post_urn") or "").strip()
+        with_image = bool(payload.get("published_with_image"))
+        if post_id and urn:
+            mark_post_published(
+                state,
+                post_id=post_id,
+                linkedin_post_urn=urn,
+                published_with_image=with_image,
+            )
+        msg = _advance_calendar_or_complete(state)
+        base_response["reply"] = f"Publicado no LinkedIn. {msg}"
+        base_response["orchestration_mode"] = state["stage"]
+        base_response["workflow_state"] = state
+        base_response["pending_actions"] = state.get("pending_actions") or []
+        base_response["deliverables"] = _deliverables_from_state(state)
+        return base_response
+
+    if action == ACTION_SKIP_PUBLISH and state["stage"] == STAGE_PUBLISH_CONFIRM:
+        msg = _advance_calendar_or_complete(state)
+        base_response["reply"] = msg
+        base_response["orchestration_mode"] = state["stage"]
+        base_response["workflow_state"] = state
+        base_response["pending_actions"] = state.get("pending_actions") or []
+        base_response["deliverables"] = _deliverables_from_state(state)
+        return base_response
+
+    # --- Comentários em publicações de perfis seguidos ---
+    if action == ACTION_ADD_FOLLOWED_PROFILE:
+        url = str(payload.get("profile_url") or "").strip()
+        name = str(payload.get("display_name") or "").strip() or None
+        if not url or "linkedin.com" not in url.casefold():
+            base_response["reply"] = "Indica um URL LinkedIn válido (ex.: https://linkedin.com/in/nome)."
+            return base_response
+        profiles = state.get("followed_profiles") or []
+        if any(str(p.get("profile_url") or "").rstrip("/") == url.rstrip("/") for p in profiles if isinstance(p, dict)):
+            base_response["reply"] = "Esse perfil já está na lista."
+        else:
+            profiles.append(normalize_followed_profile(url, name))
+            state["followed_profiles"] = profiles
+            state["stage"] = STAGE_FOLLOWED_FEED
+            base_response["reply"] = (
+                f"Perfil adicionado. Clica em «Actualizar publicações» para ver posts recentes "
+                f"e escolhe um para eu sugerir um comentário."
+            )
+        base_response["orchestration_mode"] = state.get("stage") or STAGE_FOLLOWED_FEED
+        base_response["workflow_state"] = state
+        base_response["deliverables"] = _deliverables_from_state(state)
+        return base_response
+
+    if action == ACTION_REMOVE_FOLLOWED_PROFILE:
+        pid = str(payload.get("profile_id") or "").strip()
+        profiles = [p for p in (state.get("followed_profiles") or []) if str(p.get("id")) != pid]
+        state["followed_profiles"] = profiles
+        base_response["reply"] = "Perfil removido da lista."
+        base_response["workflow_state"] = state
+        base_response["deliverables"] = _deliverables_from_state(state)
+        return base_response
+
+    if action == ACTION_SUGGEST_FOLLOWED_PROFILES:
+        from agents.director_follow_suggestions import (
+            merge_suggestions_into_state,
+            suggest_followed_profiles_from_strategy,
+        )
+
+        if not copywriter_agent.is_configured():
+            base_response["reply"] = "OPENAI_API_KEY em falta — não consigo sugerir perfis."
+            return base_response
+
+        existing_profiles = state.get("followed_profiles") or []
+        exclude = [str(p.get("profile_url") or "") for p in existing_profiles if isinstance(p, dict)]
+        try:
+            result = suggest_followed_profiles_from_strategy(
+                client,
+                openai_model,
+                state,
+                language,
+                count=int(payload.get("count") or 5),
+                exclude_urls=exclude,
+            )
+        except Exception as exc:
+            base_response["reply"] = f"Não consegui sugerir perfis: {exc}"
+            return base_response
+
+        if not result.get("success"):
+            base_response["reply"] = str(result.get("reply") or "Sem sugestões.")
+            return base_response
+
+        new_suggestions = result.get("suggestions") if isinstance(result.get("suggestions"), list) else []
+        state["followed_profile_suggestions"] = merge_suggestions_into_state(
+            state.get("followed_profile_suggestions") or [],
+            new_suggestions,
+        )
+        state["stage"] = STAGE_FOLLOWED_FEED
+        base_response["reply"] = str(result.get("reply") or "Sugestões prontas no painel.")
+        base_response["orchestration_mode"] = STAGE_FOLLOWED_FEED
+        base_response["workflow_state"] = state
+        base_response["deliverables"] = _deliverables_from_state(state)
+        return base_response
+
+    if action == ACTION_ACCEPT_FOLLOWED_SUGGESTIONS:
+        from agents.director_follow_suggestions import accept_followed_suggestions
+
+        ids = payload.get("suggestion_ids")
+        id_list = ids if isinstance(ids, list) else []
+        merged = accept_followed_suggestions(
+            state.get("followed_profiles") or [],
+            state.get("followed_profile_suggestions") or [],
+            id_list,
+            accept_all=bool(payload.get("accept_all")),
+        )
+        state["followed_profiles"] = merged.get("profiles") or []
+        state["followed_profile_suggestions"] = merged.get("suggestions") or []
+        state["stage"] = STAGE_FOLLOWED_FEED
+        added = int(merged.get("added_count") or 0)
+        if added:
+            names = ", ".join(merged.get("added_names") or [])[:200]
+            base_response["reply"] = (
+                f"Adicionei {added} perfil(is): {names}. "
+                "Clica em «Actualizar perfis guardados» para ver publicações."
+            )
+        else:
+            base_response["reply"] = "Nenhum perfil novo foi adicionado."
+        base_response["orchestration_mode"] = STAGE_FOLLOWED_FEED
+        base_response["workflow_state"] = state
+        base_response["deliverables"] = _deliverables_from_state(state)
+        return base_response
+
+    if action == ACTION_DISMISS_FOLLOWED_SUGGESTION:
+        sid = str(payload.get("suggestion_id") or "").strip()
+        updated: List[Dict[str, Any]] = []
+        for row in state.get("followed_profile_suggestions") or []:
+            if not isinstance(row, dict):
+                continue
+            item = dict(row)
+            if str(item.get("id")) == sid:
+                item["status"] = "dismissed"
+            updated.append(item)
+        state["followed_profile_suggestions"] = updated
+        base_response["reply"] = "Sugestão removida."
+        base_response["workflow_state"] = state
+        base_response["deliverables"] = _deliverables_from_state(state)
+        return base_response
+
+    if action == ACTION_MERGE_FOLLOWED_POSTS:
+        from agents.director_follow_feed import merge_profiles_from_posts
+
+        incoming = payload.get("posts")
+        feed_message = str(payload.get("feed_message") or "").strip()
+        if isinstance(incoming, list) and incoming:
+            if payload.get("auto_add_profiles"):
+                state["followed_profiles"] = merge_profiles_from_posts(
+                    state.get("followed_profiles") or [],
+                    incoming,
+                )
+            state["followed_posts_queue"] = merge_posts_into_queue(
+                state.get("followed_posts_queue") or [],
+                incoming,
+            )
+            state["stage"] = STAGE_FOLLOWED_FEED
+            n = len(incoming)
+            base_response["reply"] = feed_message or (
+                f"Encontrei {n} publicação(ões) recentes. Escolhe uma no painel "
+                "para eu sugerir um comentário."
+            )
+        else:
+            base_response["reply"] = feed_message or "Não encontrei publicações novas nesses perfis."
+        base_response["orchestration_mode"] = state.get("stage") or STAGE_FOLLOWED_FEED
+        base_response["workflow_state"] = state
+        base_response["deliverables"] = _deliverables_from_state(state)
+        return base_response
+
+    if action == ACTION_SELECT_FOLLOWED_POST:
+        post_id = str(payload.get("post_id") or "").strip()
+        followed = find_followed_post(state.get("followed_posts_queue") or [], post_id)
+        if not followed:
+            base_response["reply"] = "Não encontrei essa publicação na fila."
+            return base_response
+        try:
+            msg = _start_comment_review_for_followed_post(
+                client=client,
+                model=openai_model,
+                state=state,
+                language=language,
+                followed_post=followed,
+            )
+            base_response["reply"] = msg
+        except Exception as exc:  # noqa: BLE001
+            base_response["reply"] = f"Não consegui gerar o comentário: {exc!s}"
+        base_response["orchestration_mode"] = state["stage"]
+        base_response["workflow_state"] = state
+        base_response["pending_actions"] = state.get("pending_actions") or []
+        base_response["deliverables"] = _deliverables_from_state(state)
+        return base_response
+
+    if action == ACTION_GENERATE_ENGAGEMENT:
+        nxt = next_pending_followed_post(state.get("followed_posts_queue") or [])
+        if not nxt:
+            base_response["reply"] = (
+                "Adiciona perfis que segues e clica em «Actualizar publicações» "
+                "para eu sugerir comentários."
+            )
+            state["stage"] = STAGE_FOLLOWED_FEED
+        else:
+            try:
+                msg = _start_comment_review_for_followed_post(
+                    client=client,
+                    model=openai_model,
+                    state=state,
+                    language=language,
+                    followed_post=nxt,
+                )
+                base_response["reply"] = msg
+            except Exception as exc:  # noqa: BLE001
+                base_response["reply"] = f"Não consegui gerar o comentário: {exc!s}"
+        base_response["orchestration_mode"] = state.get("stage") or STAGE_FOLLOWED_FEED
+        base_response["workflow_state"] = state
+        base_response["pending_actions"] = state.get("pending_actions") or []
+        base_response["deliverables"] = _deliverables_from_state(state)
+        return base_response
+
+    if action == ACTION_APPROVE_ENGAGEMENT and state["stage"] == STAGE_ENGAGEMENT_REVIEW:
+        draft = dict(state.get("engagement_draft") or {})
+        new_body = str(payload.get("comment_body") or "").strip()
+        if new_body:
+            draft["comment_body"] = new_body
+        fpid = str(draft.get("followed_post_id") or state.get("active_followed_post_id") or "")
+        if draft.get("comment_body"):
+            append_approved_engagement(state, draft)
+            if fpid:
+                state["followed_posts_queue"] = update_followed_post_status(
+                    state.get("followed_posts_queue") or [],
+                    fpid,
+                    "approved",
+                )
+        state["stage"] = STAGE_FOLLOWED_FEED
+        state["pending_actions"] = [ACTION_SELECT_FOLLOWED_POST, ACTION_GENERATE_ENGAGEMENT]
+        url = str(draft.get("target_url") or "").strip()
+        link_hint = f" Abre a publicação: {url}" if url else ""
+        base_response["reply"] = (
+            f"Comentário aprovado — copia do painel e cola na publicação no LinkedIn.{link_hint}"
+        )
+        base_response["orchestration_mode"] = STAGE_FOLLOWED_FEED
+        base_response["workflow_state"] = state
+        base_response["deliverables"] = _deliverables_from_state(state)
+        return base_response
+
+    if action == ACTION_REJECT_ENGAGEMENT and state["stage"] == STAGE_ENGAGEMENT_REVIEW:
+        draft = state.get("engagement_draft") or {}
+        fpid = str(draft.get("followed_post_id") or state.get("active_followed_post_id") or "")
+        if fpid:
+            state["followed_posts_queue"] = update_followed_post_status(
+                state.get("followed_posts_queue") or [],
+                fpid,
+                "rejected",
+            )
+        state["engagement_draft"] = None
+        state["stage"] = STAGE_FOLLOWED_FEED
+        state["pending_actions"] = [ACTION_SELECT_FOLLOWED_POST, ACTION_GENERATE_ENGAGEMENT]
+        base_response["reply"] = "Comentário reprovado. Escolhe outra publicação ou pede nova sugestão."
+        base_response["orchestration_mode"] = STAGE_FOLLOWED_FEED
+        base_response["workflow_state"] = state
+        base_response["deliverables"] = _deliverables_from_state(state)
+        return base_response
+
+    if action == ACTION_REGENERATE_ENGAGEMENT and state["stage"] == STAGE_ENGAGEMENT_REVIEW:
+        instr = str(payload.get("edit_instructions") or "").strip() or None
+        fpid = str(state.get("active_followed_post_id") or "")
+        followed = find_followed_post(state.get("followed_posts_queue") or [], fpid)
+        if not followed:
+            base_response["reply"] = "Publicação em falta — escolhe outra na fila."
+            return base_response
+        try:
+            draft = generate_comment_for_followed_post(
+                client,
+                openai_model,
+                state,
+                followed,
+                language,
+                edit_instructions=instr,
+            )
+            state["engagement_draft"] = draft
+            base_response["reply"] = "Refiz o comentário para esta publicação. Revê abaixo."
+        except Exception as exc:  # noqa: BLE001
+            base_response["reply"] = f"Não consegui refazer o comentário: {exc!s}"
+        base_response["orchestration_mode"] = STAGE_ENGAGEMENT_REVIEW
+        base_response["workflow_state"] = state
+        base_response["pending_actions"] = [
+            ACTION_APPROVE_ENGAGEMENT,
+            ACTION_REJECT_ENGAGEMENT,
+            ACTION_REGENERATE_ENGAGEMENT,
+        ]
+        base_response["deliverables"] = _deliverables_from_state(state)
+        return base_response
+
+    if action == ACTION_SKIP_ENGAGEMENT and state["stage"] == STAGE_ENGAGEMENT_REVIEW:
+        state["engagement_draft"] = None
+        state["stage"] = STAGE_FOLLOWED_FEED
+        state["pending_actions"] = [ACTION_SELECT_FOLLOWED_POST, ACTION_GENERATE_ENGAGEMENT]
+        base_response["reply"] = "Volta ao feed de publicações quando quiseres."
+        base_response["orchestration_mode"] = STAGE_FOLLOWED_FEED
+        base_response["workflow_state"] = state
+        base_response["deliverables"] = _deliverables_from_state(state)
+        return base_response
+
+    if state["stage"] == STAGE_PUBLISH_CONFIRM and not user_action:
+        base_response["reply"] = (
+            "Publica no LinkedIn no painel ou avança sem publicar."
+        )
+        base_response["orchestration_mode"] = STAGE_PUBLISH_CONFIRM
+        base_response["workflow_state"] = state
+        base_response["pending_actions"] = [ACTION_SKIP_PUBLISH]
+        base_response["deliverables"] = _deliverables_from_state(state)
+        return base_response
+
+    if state["stage"] == STAGE_ENGAGEMENT_REVIEW and not user_action:
+        base_response["reply"] = (
+            "Revê o comentário para a publicação que segues — aprova ou reprova."
+        )
+        base_response["orchestration_mode"] = STAGE_ENGAGEMENT_REVIEW
+        base_response["workflow_state"] = state
+        base_response["pending_actions"] = [
+            ACTION_APPROVE_ENGAGEMENT,
+            ACTION_REJECT_ENGAGEMENT,
+            ACTION_REGENERATE_ENGAGEMENT,
+        ]
+        base_response["deliverables"] = _deliverables_from_state(state)
+        return base_response
+
+    if state["stage"] == STAGE_FOLLOWED_FEED and not user_action:
+        base_response["reply"] = (
+            "Escolhe uma publicação de perfis que segues para eu sugerir um comentário."
+        )
+        base_response["orchestration_mode"] = STAGE_FOLLOWED_FEED
+        base_response["workflow_state"] = state
+        base_response["pending_actions"] = [
+            ACTION_SELECT_FOLLOWED_POST,
+            ACTION_GENERATE_ENGAGEMENT,
+        ]
+        base_response["deliverables"] = _deliverables_from_state(state)
+        return base_response
+
     # --- Calendário / posts LinkedIn ---
     if action == ACTION_SELECT_POST:
         post_id = str(payload.get("post_id") or "").strip()
@@ -1079,15 +1599,17 @@ def process_director_turn(
         return base_response
 
     if action == ACTION_SKIP_IMAGE and state["stage"] == STAGE_IMAGE_CONFIRM:
+        post = dict(state.get("post") or {})
+        post["status"] = "ready"
+        state["post"] = post
         if state.get("linkedin_calendar"):
             msg = _advance_after_post_packaged(state)
             base_response["reply"] = msg
             base_response["orchestration_mode"] = state["stage"]
         else:
-            state["stage"] = STAGE_COMPLETED
-            state["pending_actions"] = []
-            base_response["reply"] = "Perfeito — pacote concluído só com a copy aprovada."
-            base_response["orchestration_mode"] = STAGE_COMPLETED
+            msg = _enter_publish_confirm(state)
+            base_response["reply"] = msg
+            base_response["orchestration_mode"] = STAGE_PUBLISH_CONFIRM
         base_response["workflow_state"] = state
         base_response["deliverables"] = _deliverables_from_state(state)
         base_response["pending_actions"] = state.get("pending_actions") or []
@@ -1133,22 +1655,15 @@ def process_director_turn(
         return base_response
 
     if action == ACTION_APPROVE_IMAGE and state["stage"] == STAGE_IMAGE_REVIEW:
-        post = state.get("post") or {}
-        if post:
-            post["status"] = "ready"
-            state["post"] = post
+        _package_post_ready(state)
         if state.get("linkedin_calendar"):
-            msg = _advance_after_post_packaged(state)
+            msg = _enter_publish_confirm(state)
             base_response["reply"] = msg
             base_response["orchestration_mode"] = state["stage"]
         else:
-            state["stage"] = STAGE_COMPLETED
-            state["pending_actions"] = []
-            base_response["reply"] = (
-                "Pacote concluído: copy e imagem aprovados. "
-                "Podes reutilizar estes materiais na tua campanha."
-            )
-            base_response["orchestration_mode"] = STAGE_COMPLETED
+            msg = _enter_publish_confirm(state)
+            base_response["reply"] = msg
+            base_response["orchestration_mode"] = STAGE_PUBLISH_CONFIRM
         base_response["workflow_state"] = state
         base_response["deliverables"] = _deliverables_from_state(state)
         base_response["pending_actions"] = state.get("pending_actions") or []
@@ -1156,11 +1671,19 @@ def process_director_turn(
         return base_response
 
     # Se já estamos numa etapa de revisão, não voltar a gerar copy sem pedido novo
-    if state["stage"] in {STAGE_COPY_REVIEW, STAGE_IMAGE_CONFIRM, STAGE_IMAGE_REVIEW}:
+    if state["stage"] in {
+        STAGE_COPY_REVIEW,
+        STAGE_IMAGE_CONFIRM,
+        STAGE_IMAGE_REVIEW,
+        STAGE_PUBLISH_CONFIRM,
+        STAGE_ENGAGEMENT_REVIEW,
+    }:
         hint = {
             STAGE_COPY_REVIEW: "Estás a rever a copy. Usa «Aprovar copy» ou edita o texto no painel.",
             STAGE_IMAGE_CONFIRM: "Confirma se queres imagem: «Gerar imagem» ou «Sem imagem».",
             STAGE_IMAGE_REVIEW: "Revê a imagem: «Aprovar imagem» ou «Regenerar imagem».",
+            STAGE_PUBLISH_CONFIRM: "Autoriza e publica no LinkedIn, ou avança sem publicar.",
+            STAGE_ENGAGEMENT_REVIEW: "Revê o comentário sugerido antes de publicar no LinkedIn.",
         }.get(state["stage"], "")
         base_response["reply"] = hint
         base_response["workflow_state"] = state
