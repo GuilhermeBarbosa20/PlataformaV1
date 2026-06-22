@@ -1547,9 +1547,29 @@ def _classify_user_intent_with_fallback(
         ):
             classification["intent"] = "engagement_batch"
             classification["confidence"] = 0.8
-        elif any(m in normalized for m in ("briefing", "analise diaria", "análise diária", "resumo do dia")):
+        elif any(
+            m in normalized
+            for m in (
+                "briefing",
+                "analise diaria",
+                "análise diária",
+                "analise de ontem",
+                "análise de ontem",
+                "ontem funcionou",
+                "o que funcionou ontem",
+                "o que funcionou",
+                "resumo do dia",
+                "melhores horas",
+                "melhores horarios",
+                "melhores horários",
+                "melhores dias",
+                "que dias publicar",
+                "que horas publicar",
+                "quando devo publicar",
+            )
+        ):
             classification["intent"] = "daily_digest"
-            classification["confidence"] = 0.75
+            classification["confidence"] = 0.8
 
     return classification
 

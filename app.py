@@ -2150,7 +2150,6 @@ def home() -> str:
           .li-btn-analyze { background: linear-gradient(180deg, #10b981, #059669); }
           .li-btn-logout { background: linear-gradient(180deg, #64748b, #475569); }
           .li-btn-optimize { background: linear-gradient(180deg, #a855f7, #7c3aed); }
-          .li-btn-briefing { background: linear-gradient(180deg, #38bdf8, #0284c7); }
           .linkedin-profile-hint { margin: 0 0 8px; font-size: 0.8rem; color: #94a3b8; min-height: 1.2em; }
           .optimization-panel {
             margin-top: 12px;
@@ -2378,7 +2377,6 @@ def home() -> str:
               <div class="linkedin-auth-actions">
                 <button type="button" class="li-btn li-btn-login" id="btnDirectorLinkedinLogin" onclick="startDirectorLinkedinLogin()">Ligar LinkedIn</button>
                 <button type="button" class="li-btn li-btn-analyze" id="btnDirectorAnalyze" onclick="runDirectorLinkedinAnalysis()" disabled>Analisar perfil</button>
-                <button type="button" class="li-btn li-btn-briefing" id="btnDirectorBriefing" onclick="runDailyDigest()" disabled style="display:none">Análise de ontem</button>
                 <button type="button" class="li-btn li-btn-optimize" id="btnDirectorOptimize" onclick="runDirectorReanalyzeAndOptimize()" disabled style="display:none">Reanalisar e otimizar</button>
                 <button type="button" class="li-btn li-btn-logout" id="btnDirectorLinkedinLogout" onclick="endDirectorLinkedinSession()" style="display:none">Terminar sessão</button>
               </div>
@@ -2664,7 +2662,6 @@ def home() -> str:
             const label = document.getElementById("linkedinAuthLabel");
             const loginBtn = document.getElementById("btnDirectorLinkedinLogin");
             const analyzeBtn = document.getElementById("btnDirectorAnalyze");
-            const briefingBtn = document.getElementById("btnDirectorBriefing");
             const optimizeBtn = document.getElementById("btnDirectorOptimize");
             const logoutBtn = document.getElementById("btnDirectorLinkedinLogout");
             const hint = document.getElementById("linkedinProfileHint");
@@ -2688,10 +2685,6 @@ def home() -> str:
               || (workflowState.strategy.content_pillars && workflowState.strategy.content_pillars.length)
               || workflowState.strategy.summary
             );
-            if (briefingBtn) {
-              briefingBtn.style.display = connected && hasStrategy ? "" : "none";
-              briefingBtn.disabled = !connected || !hasStrategy;
-            }
             if (optimizeBtn) {
               optimizeBtn.style.display = connected && hasStrategy ? "" : "none";
               optimizeBtn.disabled = !connected || !hasStrategy;
@@ -3695,10 +3688,7 @@ def home() -> str:
                 ${timingSection}
                 ${focus}
                 ${adjust}
-                ${prioHtml}
-                <div class="workflow-actions">
-                  <button type="button" class="wf-btn wf-btn-secondary" onclick="runDailyDigest()">Actualizar análise</button>
-                </div>`;
+                ${prioHtml}`;
             return wrapDirectorCollapsiblePanel(
               "daily_digest",
               digest.headline || "Análise de ontem",
@@ -4125,15 +4115,6 @@ def home() -> str:
             const instr = window.prompt("O que queres mudar no comentário? (opcional)") || "";
             directorAction("regenerate_engagement", { edit_instructions: instr }, "Refazer comentário.");
           };
-          function shouldRunDailyDigest(ws) {
-            if (!ws || !ws.strategy) return false;
-            const smart = ws.strategy.smart_objectives || ws.strategy.content_pillars || ws.strategy.summary;
-            if (!smart) return false;
-            const today = new Date().toISOString().slice(0, 10);
-            return String(ws.last_daily_digest_at || "") !== today;
-          }
-
-          window.runDailyDigest = () => directorAction("run_daily_digest", {}, "Análise de ontem — o que funcionou e o que ajustar.");
           window.loadFollowedProfilesFromDatabase = loadFollowedProfilesFromDatabase;
           window.generateEngagementBatch = () => directorAction(
             "generate_engagement_batch",
@@ -4248,9 +4229,6 @@ def home() -> str:
                 },
                 workflow_state: workflowState,
               });
-            }
-            if (shouldRunDailyDigest(workflowState)) {
-              await directorAction("run_daily_digest", {}, "");
             }
           })();
           chatInput.addEventListener("keydown", (event) => {

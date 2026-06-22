@@ -1,8 +1,8 @@
-"""Digest diário do Diretor — análise de progresso e propostas do dia.
+"""Digest diário do Diretor — análise de progresso sob pedido no chat.
 
-Corre automaticamente na primeira visita de cada dia (browser) ou via
-``run_daily_digest`` quando o utilizador tem estratégia activa. Com análise
-LinkedIn recente, reutiliza o relatório de optimização (Fase C).
+Quando o utilizador pergunta (ex.: «o que funcionou ontem», «melhores horas
+para publicar»), o Diretor gera a análise e mostra no painel. Não há botão
+nem execução automática ao abrir a página.
 """
 
 from __future__ import annotations
