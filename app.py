@@ -2410,6 +2410,7 @@ def home() -> str:
           let workflowState = null;
           let directorSupabaseClient = null;
           let directorLinkedinSession = null;
+          let directorLinkedinBarPinned = false;
           const WORKFLOW_STORAGE_KEY = "plataforma_director_workflow";
           const DIRECTOR_WELCOME = (
             "Olá! Sou o teu Diretor de Marketing. Diz-me o que queres fazer — "
@@ -2421,6 +2422,49 @@ def home() -> str:
             const hint = document.getElementById("linkedinProfileHint");
             if (bar) bar.classList.toggle("director-linkedin-hidden", !visible);
             if (hint) hint.classList.toggle("director-linkedin-hidden", !visible);
+          }
+
+          function userTextNeedsLinkedinBar(text) {
+            const t = String(text || "")
+              .toLowerCase()
+              .normalize("NFD")
+              .replace(/[\u0300-\u036f]/g, "");
+            if (!t) return false;
+            const markers = [
+              "linkedin", "linked in", "linkdin", "linkddin", "likedin",
+              "briefing", "analise diaria", "analise de ontem", "ontem funcionou",
+              "melhores horas", "melhores dias", "posts do linkedin", "meu linkedin",
+              "publicar no linkedin", "perfil linkedin", "ssi", "linkeding",
+            ];
+            return markers.some((m) => t.includes(m));
+          }
+
+          function responseNeedsLinkedinBar(data) {
+            const reply = String((data && data.reply) || "").toLowerCase();
+            if (
+              reply.includes("ligar linkedin")
+              || reply.includes("liga a conta")
+              || reply.includes("liga o linkedin")
+              || reply.includes("ligar a conta")
+            ) {
+              return true;
+            }
+            const actions = (data && data.pending_actions) || [];
+            return actions.some((a) => {
+              const s = String(a).toLowerCase();
+              return s.includes("linkedin") || s.includes("analyze");
+            });
+          }
+
+          function shouldShowDirectorLinkedinBar(data) {
+            if (directorLinkedinSessionActive()) return true;
+            if (directorLinkedinBarPinned) return true;
+            const lastUser = [...messages].reverse().find((m) => m.role === "user");
+            if (lastUser && userTextNeedsLinkedinBar(lastUser.content)) return true;
+            if (data && responseNeedsLinkedinBar(data)) return true;
+            const ws = (data && data.workflow_state) || workflowState || {};
+            const mode = (data && data.orchestration_mode) || ws.stage || "idle";
+            return isDirectorLinkedinContext(mode, ws, (data && data.deliverables) || {});
           }
 
           function directorLinkedinSessionActive() {
@@ -2651,6 +2695,9 @@ def home() -> str:
               void saveFollowedProfilesToDatabase();
             }
             addMessage("assistant", sanitizeChatReply(data.reply));
+            if (responseNeedsLinkedinBar(data)) {
+              directorLinkedinBarPinned = true;
+            }
             renderDirectorPanel(data);
             await refreshDirectorLinkedinAuth();
           }
@@ -2759,6 +2806,7 @@ def home() -> str:
               purgeStaleLinkedinDeliverables(workflowState);
             }
             saveWorkflowState();
+            setDirectorLinkedinBarVisible(shouldShowDirectorLinkedinBar({ workflow_state: workflowState }));
           }
 
           async function startDirectorLinkedinLogin() {
@@ -3938,7 +3986,7 @@ def home() -> str:
             }[mode] || "";
 
             const linkedinContext = isDirectorLinkedinContext(mode, ws, deliverables);
-            setDirectorLinkedinBarVisible(directorLinkedinSessionActive() || linkedinContext);
+            setDirectorLinkedinBarVisible(shouldShowDirectorLinkedinBar(data));
             let workflowHtml = (linkedinContext ? renderProfilePanel(linkedinAnalysis) : "")
               + (linkedinContext ? renderStrategyPanel(strategy, mode) : "")
               + (mode === "daily_digest_review" ? renderDailyDigestPanel(dailyDigest, mode) : "")
@@ -4022,7 +4070,7 @@ def home() -> str:
               || (mode !== "idle" && mode !== "planning" && mode !== "strategy_brief");
             if (!showPanel) {
               result.innerHTML = "";
-              if (!linkedinContext) setDirectorLinkedinBarVisible(false);
+              setDirectorLinkedinBarVisible(shouldShowDirectorLinkedinBar(data));
               return;
             }
 
@@ -4260,6 +4308,10 @@ def home() -> str:
             if (!content) return;
             await refreshDirectorLinkedinAuth();
             purgeStaleLinkedinDeliverables(workflowState);
+            if (userTextNeedsLinkedinBar(content)) {
+              directorLinkedinBarPinned = true;
+              setDirectorLinkedinBarVisible(true);
+            }
             addMessage("user", content);
             chatInput.value = "";
             await callDirector(buildPayload());
@@ -4268,6 +4320,7 @@ def home() -> str:
           function resetChat() {
             messages.length = 0;
             workflowState = null;
+            directorLinkedinBarPinned = false;
             saveWorkflowState();
             chatLog.innerHTML = "";
             result.innerHTML = "";
