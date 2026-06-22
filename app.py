@@ -2454,8 +2454,25 @@ def home() -> str:
             }
             if (stage === "strategy_brief" && !ws.strategy) return false;
             if (stage === "followed_feed" || stage === "engagement_review" || stage === "engagement_batch_review") return true;
-            if (stage === "daily_digest_review" || ws.daily_digest) return true;
+            if (stage === "daily_digest_review") return true;
             return hasDeliverable;
+          }
+
+          function showSavedSessionHint(ws) {
+            if (!shouldRestoreDirectorPanel(ws)) return;
+            const stage = String((ws && ws.stage) || "idle");
+            const hints = {
+              copy_review: "continua o post",
+              optimization_review: "mostra a análise de optimização",
+              posts_review: "mostra o calendário",
+              strategy_review: "mostra a estratégia",
+            };
+            const example = hints[stage] || "continua onde parei";
+            result.innerHTML = (
+              "<p class=\"hint\">Tens uma sessão guardada neste browser. "
+              + "O painel só aparece quando pedires no chat — por exemplo: «"
+              + escapeHtml(example) + "».</p>"
+            );
           }
 
           function loadWorkflowState() {
@@ -3693,7 +3710,7 @@ def home() -> str:
               "daily_digest",
               digest.headline || "Análise de ontem",
               body,
-              mode === "daily_digest_review" || mode === "optimization_review",
+              mode === "daily_digest_review",
               "director-collapse--digest"
             );
           }
@@ -3870,7 +3887,7 @@ def home() -> str:
             setDirectorLinkedinBarVisible(linkedinContext);
             let workflowHtml = (linkedinContext ? renderProfilePanel(linkedinAnalysis) : "")
               + (linkedinContext ? renderStrategyPanel(strategy, mode) : "")
-              + renderDailyDigestPanel(dailyDigest, mode)
+              + (mode === "daily_digest_review" ? renderDailyDigestPanel(dailyDigest, mode) : "")
               + (linkedinContext ? renderOptimizationPanel(optimizationReport, mode) : "")
               + (linkedinContext ? renderCalendarPanel(calendar, activePostId, mode) : "")
               + (linkedinContext ? renderPublishPanel(post, mode) : "")
@@ -4205,31 +4222,11 @@ def home() -> str:
           loadWorkflowState();
           setDirectorLinkedinBarVisible(false);
           addMessage("assistant", DIRECTOR_WELCOME);
+          showSavedSessionHint(workflowState);
           (async function bootstrapDirectorPage() {
             await initDirectorSupabaseFromUrl();
             await refreshDirectorLinkedinAuth();
             await processDirectorPublishOAuthReturn();
-            if (shouldRestoreDirectorPanel(workflowState)) {
-              renderDirectorPanel({
-                orchestration_mode: workflowState.stage || "idle",
-                execution_plan: workflowState.execution_plan || "",
-                deliverables: {
-                  strategy: workflowState.strategy,
-                  linkedin_analysis: workflowState.linkedin_analysis,
-                  linkedin_calendar: workflowState.linkedin_calendar,
-                  optimization_report: workflowState.optimization_report,
-                  daily_digest: workflowState.daily_digest,
-                  engagement_draft: workflowState.engagement_draft,
-                  engagement_batch: workflowState.engagement_batch,
-                  followed_profiles: workflowState.followed_profiles,
-                  followed_profile_suggestions: workflowState.followed_profile_suggestions,
-                  followed_posts_queue: workflowState.followed_posts_queue,
-                  post: workflowState.post,
-                  image: workflowState.image,
-                },
-                workflow_state: workflowState,
-              });
-            }
           })();
           chatInput.addEventListener("keydown", (event) => {
             if (event.key === "Enter" && !event.shiftKey) {
