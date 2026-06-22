@@ -2423,6 +2423,41 @@ def home() -> str:
             if (hint) hint.classList.toggle("director-linkedin-hidden", !visible);
           }
 
+          function directorLinkedinSessionActive() {
+            return Boolean(directorLinkedinSession && directorLinkedinSession.access_token);
+          }
+
+          function purgeStaleLinkedinDeliverables(ws) {
+            if (!ws || typeof ws !== "object" || directorLinkedinSessionActive()) return;
+            ws.linkedin_connected = false;
+            ws.linkedin_analysis = null;
+            ws.linkedin_analysis_baseline = null;
+            ws.optimization_report = null;
+            ws.daily_digest = null;
+            ws.linkedin_posts = [];
+            ws.linkedin_calendar = [];
+            ws.post = null;
+            ws.copy = null;
+            ws.image = null;
+            ws.engagement_draft = null;
+            ws.engagement_batch = [];
+            ws.followed_posts_queue = [];
+            const linkedinStages = new Set([
+              "optimization_review", "daily_digest_review", "posts_review",
+              "copy_review", "image_confirm", "image_review", "publish_confirm",
+              "followed_feed", "engagement_review", "engagement_batch_review",
+            ]);
+            const stage = String(ws.stage || "idle");
+            if (linkedinStages.has(stage)) {
+              const hasStrategy = ws.strategy && (
+                (ws.strategy.smart_objectives && ws.strategy.smart_objectives.length)
+                || (ws.strategy.content_pillars && ws.strategy.content_pillars.length)
+                || ws.strategy.summary
+              );
+              ws.stage = hasStrategy ? "strategy_review" : "idle";
+            }
+          }
+
           function normalizePersistedWorkflowState(ws) {
             if (!ws || typeof ws !== "object") return null;
             const stage = String(ws.stage || "idle");
@@ -2717,7 +2752,10 @@ def home() -> str:
                 void loadFollowedProfilesFromDatabase();
               }
             } else if (hint) {
-              hint.textContent = "";
+              hint.textContent = "Liga o LinkedIn para análise, briefing e publicação.";
+            }
+            if (!connected) {
+              purgeStaleLinkedinDeliverables(workflowState);
             }
             saveWorkflowState();
           }
@@ -3201,6 +3239,8 @@ def home() -> str:
             if (userLabel) {
               addMessage("user", userLabel);
             }
+            await refreshDirectorLinkedinAuth();
+            purgeStaleLinkedinDeliverables(workflowState);
             await callDirector(buildPayload({
               user_action: action,
               action_payload: actionPayload
@@ -3517,17 +3557,34 @@ def home() -> str:
             );
           }
 
+          function directorHasStrategy(workflowStateRef, deliverablesRef) {
+            const s = (deliverablesRef && deliverablesRef.strategy) || (workflowStateRef && workflowStateRef.strategy);
+            return Boolean(s && (
+              (s.smart_objectives && s.smart_objectives.length)
+              || (s.content_pillars && s.content_pillars.length)
+              || s.summary
+            ));
+          }
+
           function isDirectorLinkedinContext(mode, workflowState, deliverables) {
+            const ws = workflowState || {};
+            const d = deliverables || {};
+            const sessionOk = directorLinkedinSessionActive() || Boolean(ws.linkedin_connected);
+            const hasStrategy = directorHasStrategy(ws, d);
             const linkedinModes = new Set([
               "strategy_brief", "strategy_review", "strategy_approved",
               "optimization_review", "daily_digest_review", "posts_review", "publish_confirm",
               "followed_feed", "engagement_review", "engagement_batch_review"
             ]);
+            if (!sessionOk) {
+              if (hasStrategy && ["strategy_brief", "strategy_review", "strategy_approved"].includes(mode)) {
+                return true;
+              }
+              return false;
+            }
             if (linkedinModes.has(mode)) return true;
-            const ws = workflowState || {};
             const channels = (ws.channels || []).map((c) => String(c).toLowerCase());
             if (channels.includes("linkedin")) return true;
-            const d = deliverables || {};
             if (d.strategy) return true;
             if (Array.isArray(d.linkedin_calendar) && d.linkedin_calendar.length) return true;
             if (Array.isArray(ws.linkedin_calendar) && ws.linkedin_calendar.length) return true;
@@ -3884,17 +3941,19 @@ def home() -> str:
             }[mode] || "";
 
             const linkedinContext = isDirectorLinkedinContext(mode, ws, deliverables);
-            setDirectorLinkedinBarVisible(linkedinContext);
+            setDirectorLinkedinBarVisible(
+              linkedinContext || directorLinkedinSessionActive() || directorHasStrategy(ws, deliverables)
+            );
             let workflowHtml = (linkedinContext ? renderProfilePanel(linkedinAnalysis) : "")
-              + (linkedinContext ? renderStrategyPanel(strategy, mode) : "")
+              + renderStrategyPanel(strategy, mode)
               + (mode === "daily_digest_review" ? renderDailyDigestPanel(dailyDigest, mode) : "")
-              + (linkedinContext ? renderOptimizationPanel(optimizationReport, mode) : "")
+              + (linkedinContext && mode === "optimization_review" ? renderOptimizationPanel(optimizationReport, mode) : "")
               + (linkedinContext ? renderCalendarPanel(calendar, activePostId, mode) : "")
               + (linkedinContext ? renderPublishPanel(post, mode) : "")
               + renderFollowedFeedPanel(followedProfiles, followedPostsQueue, followedSuggestions, mode, linkedinContext)
               + renderEngagementBatchPanel(engagementBatch, mode)
               + (linkedinContext ? renderEngagementPanel(engagementDraft, mode) : "");
-            if (post && post.body && mode !== "engagement_review") {
+            if (post && post.body && mode !== "engagement_review" && linkedinContext) {
               const readonly = mode !== "copy_review";
               const metaParts = [];
               if (post.title) metaParts.push(`Título: ${post.title}`);
@@ -4204,6 +4263,8 @@ def home() -> str:
           async function sendMessage() {
             const content = chatInput.value.trim();
             if (!content) return;
+            await refreshDirectorLinkedinAuth();
+            purgeStaleLinkedinDeliverables(workflowState);
             addMessage("user", content);
             chatInput.value = "";
             await callDirector(buildPayload());
@@ -4220,6 +4281,7 @@ def home() -> str:
           }
 
           loadWorkflowState();
+          purgeStaleLinkedinDeliverables(workflowState);
           setDirectorLinkedinBarVisible(false);
           addMessage("assistant", DIRECTOR_WELCOME);
           showSavedSessionHint(workflowState);

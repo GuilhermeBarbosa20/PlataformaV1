@@ -101,8 +101,9 @@ def _build_light_digest_with_llm(
         "É o briefing matinal do director de marketing. O utilizador quer saber "
         "O QUE FUNCIONOU ONTEM / NA ÚLTIMA ANÁLISE e O QUE FICOU AQUÉM — como um "
         "analista que reviu posts, formatos e métricas face aos objectivos SMART.\n"
-        "Usa os dados de performance fornecidos; se faltarem dados por post, diz-o "
-        "claramente mas infere padrões (formato, cadência, execução do calendário).\n"
+        "Usa APENAS os dados de performance fornecidos. Se faltarem posts ou métricas, "
+        "diz explicitamente que não há dados suficientes — NUNCA inventes números, "
+        "resultados de ontem nem posts que não apareçam nos dados.\n"
         "JSON:\n"
         '{"headline":"título tipo «Ontem X funcionou; hoje foca em Y»",'
         '"summary":"2-4 frases directas sobre ontem/último período",'
@@ -178,6 +179,71 @@ def _build_light_digest_with_llm(
     }
 
 
+def _digest_prerequisite_response(state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Valida pré-requisitos antes de um briefing diário com dados reais.
+
+    Exige sessão LinkedIn ligada, perfil analisado e estratégia definida.
+    Não inventa métricas quando faltam dados.
+
+    Argumentos:
+        state: Estado mutável do workflow do Diretor.
+
+    Retorno:
+        Payload de resposta para o utilizador se faltar algum pré-requisito;
+        ``None`` quando pode prosseguir com o digest.
+    """
+
+    if not bool(state.get("linkedin_connected")):
+        stage = str(state.get("stage") or "idle")
+        if stage in ("daily_digest_review", "optimization_review"):
+            strategy = state.get("strategy") or {}
+            state["stage"] = (
+                "strategy_review"
+                if isinstance(strategy, dict) and strategy_has_core_content(strategy)
+                else "idle"
+            )
+        return {
+            "reply": (
+                "Para um **briefing diário com dados reais** do LinkedIn, primeiro liga a conta "
+                "no painel (botão «Ligar LinkedIn»). Sem sessão activa não analiso métricas nem "
+                "invento resultados de publicações."
+            ),
+            "orchestration_mode": str(state.get("stage") or "idle"),
+            "workflow_state": state,
+            "pending_actions": [],
+        }
+
+    analysis = state.get("linkedin_analysis")
+    profile_url = ""
+    if isinstance(analysis, dict):
+        profile_url = str(analysis.get("profile_url") or "").strip()
+    if not profile_url:
+        return {
+            "reply": (
+                "Tens o LinkedIn ligado, mas ainda **não analisei o teu perfil**. "
+                "Clica em «Analisar perfil» no painel — só depois consigo dizer o que funcionou "
+                "ontem e sugerir melhores dias/horas com base em dados reais."
+            ),
+            "orchestration_mode": str(state.get("stage") or "idle"),
+            "workflow_state": state,
+            "pending_actions": ["analyze_linkedin_profile"],
+        }
+
+    if not strategy_has_core_content(state.get("strategy") or {}):
+        state["stage"] = "strategy_brief"
+        return {
+            "reply": (
+                "Já tenho o perfil analisado, mas falta uma **estratégia com objectivos SMART**. "
+                "Descreve o que queres atingir no LinkedIn (seguidores, leads, autoridade…) e eu "
+                "monto o plano; o briefing diário compara depois os resultados com esses objectivos."
+            ),
+            "orchestration_mode": "strategy_brief",
+            "workflow_state": state,
+            "pending_actions": [],
+        }
+    return None
+
+
 def run_daily_digest(
     client: OpenAI,
     model: str,
@@ -199,6 +265,10 @@ def run_daily_digest(
         ``reply``, ``orchestration_mode``, ``workflow_state``, ``deliverables``,
         ``pending_actions`` prontos para fundir em ``base_response``.
     """
+
+    blocked = _digest_prerequisite_response(state)
+    if blocked:
+        return blocked
 
     state["last_daily_digest_at"] = today_utc_date()
     record_performance_snapshot(state)
@@ -254,6 +324,26 @@ def run_daily_digest(
                 "workflow_state": state,
                 "pending_actions": state["pending_actions"],
             }
+
+    published_count = int((performance.get("calendar_review") or {}).get("published_count") or 0)
+    top_posts = performance.get("top_posts") or []
+    if published_count == 0 and not top_posts:
+        stage = str(state.get("stage") or "strategy_approved")
+        if stage in ("daily_digest_review", "optimization_review"):
+            stage = "strategy_approved"
+        state["stage"] = stage
+        state["daily_digest"] = None
+        return {
+            "reply": (
+                "Analisei o teu perfil, mas **ainda não há posts publicados** (ou dados Apify "
+                "insuficientes) para medir «o que funcionou ontem». Prioridade: aprovar e "
+                "publicar o primeiro post do calendário; no dia seguinte já consigo um briefing "
+                "com métricas reais."
+            ),
+            "orchestration_mode": stage,
+            "workflow_state": state,
+            "pending_actions": state.get("pending_actions") or [],
+        }
 
     digest = _build_light_digest_with_llm(client, model, state, language)
     state["daily_digest"] = digest

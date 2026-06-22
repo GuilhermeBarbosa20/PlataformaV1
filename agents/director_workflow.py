@@ -293,7 +293,61 @@ def normalize_workflow_state(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     actions = raw.get("pending_actions")
     state["pending_actions"] = actions if isinstance(actions, list) else []
     state["standalone_image"] = bool(raw.get("standalone_image"))
+    _sanitize_disconnected_linkedin_state(state)
     return state
+
+
+_LINKEDIN_SESSION_STAGES = frozenset({
+    STAGE_POSTS_REVIEW,
+    STAGE_OPTIMIZATION_REVIEW,
+    STAGE_DAILY_DIGEST_REVIEW,
+    STAGE_COPY_REVIEW,
+    STAGE_IMAGE_CONFIRM,
+    STAGE_IMAGE_REVIEW,
+    STAGE_PUBLISH_CONFIRM,
+    STAGE_ENGAGEMENT_REVIEW,
+    STAGE_ENGAGEMENT_BATCH_REVIEW,
+    STAGE_FOLLOWED_FEED,
+})
+
+
+def _sanitize_disconnected_linkedin_state(state: Dict[str, Any]) -> None:
+    """Remove dados LinkedIn operacionais quando a sessão não está ligada.
+
+    O frontend pode enviar estado antigo do ``localStorage`` com análise,
+    calendário e posts mesmo com ``linkedin_connected`` falso. Esta função
+    impede que o Diretor actue como se houvesse métricas reais.
+
+    Argumentos:
+        state: Estado normalizado do workflow (mutado in-place).
+
+    Retorno:
+        Nenhum.
+    """
+
+    if state.get("linkedin_connected"):
+        return
+    state["linkedin_analysis"] = None
+    state["linkedin_analysis_baseline"] = None
+    state["optimization_report"] = None
+    state["daily_digest"] = None
+    state["linkedin_profile_url"] = ""
+    state["linkedin_posts"] = []
+    state["linkedin_calendar"] = []
+    state["post"] = None
+    state["copy"] = None
+    state["image"] = None
+    state["engagement_draft"] = None
+    state["engagement_batch"] = []
+    state["followed_posts_queue"] = []
+    stage = str(state.get("stage") or STAGE_IDLE)
+    if stage in _LINKEDIN_SESSION_STAGES:
+        strategy = state.get("strategy")
+        state["stage"] = (
+            STAGE_STRATEGY_REVIEW
+            if isinstance(strategy, dict) and strategy_has_core_content(strategy)
+            else STAGE_IDLE
+        )
 
 
 def detect_action_from_text(text: str) -> Optional[str]:
