@@ -12,6 +12,13 @@ from typing import Any, Dict, List, Optional
 
 from openai import OpenAI
 
+from agents.director_prompts import (
+    analysis_context_snippet,
+    director_voice_block,
+    engagement_comment_rules_block,
+    engagement_history_snippet,
+    linkedin_organic_excellence_block,
+)
 from agents.director_strategy import _parse_llm_json, strategy_brief_for_execution
 
 
@@ -48,31 +55,36 @@ def generate_comment_for_followed_post(
     post_url = str(followed_post.get("post_url") or "").strip()
     instr = str(edit_instructions or "").strip()
 
+    analysis_ctx = analysis_context_snippet(state.get("linkedin_analysis"))
+    history_ctx = engagement_history_snippet(state)
     system_prompt = (
-        f"És o Diretor de Marketing AI — especialista em engagement LinkedIn B2B. "
-        f"Responde em {language}. "
+        f"{director_voice_block(language)}\n"
+        f"{linkedin_organic_excellence_block()}\n"
+        f"{engagement_comment_rules_block()}\n"
         "O utilizador vai comentar numa PUBLICAÇÃO DE OUTRA PESSOA (perfil que segue). "
-        "Escreve UM comentário profissional, autêntico e útil — acrescenta valor real "
-        "(insight, pergunta inteligente, experiência breve). "
-        "Proibido: spam, pitch de vendas, «adorei o post», elogios vazios, hashtags em excesso. "
-        "Comprimento: 2–5 frases, máximo ~80 palavras. "
         "Responde APENAS JSON: "
         '{"comment_body":"...","angle":"porque este comentário encaixa na estratégia do utilizador"}'
     )
     user_prompt = (
         f"Estratégia do utilizador:\n{brief or json.dumps(strategy, ensure_ascii=False)[:2000]}\n\n"
+    )
+    if analysis_ctx:
+        user_prompt += f"Contexto do perfil do utilizador:\n{analysis_ctx}\n\n"
+    if history_ctx:
+        user_prompt += f"{history_ctx}\n\n"
+    user_prompt += (
         f"PUBLICAÇÃO A COMENTAR (de {author}):\n"
         f"URL: {post_url or 'n/d'}\n"
         f"Texto da publicação:\n{snippet or '(sem texto recolhido — infere pelo contexto profissional)'}\n\n"
-        "Gera um comentário que o utilizador possa publicar nesta publicação específica."
+        "Gera um comentário específico para ESTA publicação — não genérico."
     )
     if instr:
         user_prompt += f"\nInstruções do utilizador: {instr}\n"
 
     response = client.chat.completions.create(
         model=model,
-        temperature=0.55,
-        max_tokens=1024,
+        temperature=0.62,
+        max_tokens=1200,
         response_format={"type": "json_object"},
         messages=[
             {"role": "system", "content": system_prompt},
@@ -171,21 +183,26 @@ def generate_comments_batch(
     if not lines:
         return []
 
+    analysis_ctx = analysis_context_snippet(state.get("linkedin_analysis"))
+    history_ctx = engagement_history_snippet(state)
     system_prompt = (
-        f"És o Diretor de Marketing AI — engagement LinkedIn B2B. Responde em {language}. "
-        "Para cada publicação listada, escreve UM comentário profissional e útil "
-        "(2–5 frases, ~80 palavras máx.). Sem spam nem pitch. "
+        f"{director_voice_block(language)}\n"
+        f"{linkedin_organic_excellence_block()}\n"
+        f"{engagement_comment_rules_block()}\n"
+        "Para cada publicação listada, escreve UM comentário distinto dos outros. "
         "JSON: "
         '{"comments":[{"post_id":"...","comment_body":"...","angle":"..."}]}'
     )
-    user_prompt = (
-        f"Estratégia do utilizador:\n{brief[:3500]}\n\n"
-        f"PUBLICAÇÕES ({len(lines)}):\n" + "\n".join(lines)
-    )
+    user_prompt = f"Estratégia do utilizador:\n{brief[:3500]}\n\n"
+    if analysis_ctx:
+        user_prompt += f"Contexto do perfil:\n{analysis_ctx}\n\n"
+    if history_ctx:
+        user_prompt += f"{history_ctx}\n\n"
+    user_prompt += f"PUBLICAÇÕES ({len(lines)}):\n" + "\n".join(lines)
     response = client.chat.completions.create(
         model=model,
-        temperature=0.55,
-        max_tokens=4096,
+        temperature=0.65,
+        max_tokens=6000,
         response_format={"type": "json_object"},
         messages=[
             {"role": "system", "content": system_prompt},

@@ -13,6 +13,8 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from openai import OpenAI
 
+from agents.director_prompts import director_voice_block, linkedin_organic_excellence_block
+
 STRATEGY_MARKERS = (
     "estrategia",
     "estratégia",
@@ -522,8 +524,9 @@ def generate_linkedin_strategy(
         profile_block = f"\n\nDados do perfil analisado:\n{profile_context}"
 
     system_prompt = (
-        f"És o Diretor de Marketing AI — marketeer sénior especializado em LinkedIn orgânico. "
-        f"Responde ao utilizador em {language}. "
+        f"{director_voice_block(language)}\n"
+        f"{linkedin_organic_excellence_block()}\n"
+        "Especialização: LinkedIn orgânico B2B. "
         "O utilizador define os SEUS objetivos (podem ser seguidores, SSI, ranking, leads, "
         "autoridade, marca, engagement, vendas, ou qualquer combinação). "
         "Tu inventas a ESTRATÉGIA completa para atingir exactamente o que ele pediu — "
@@ -558,7 +561,8 @@ def generate_linkedin_strategy(
 
     response = client.chat.completions.create(
         model=model,
-        temperature=0.4,
+        temperature=0.38,
+        max_tokens=5000,
         response_format={"type": "json_object"},
         messages=[
             {"role": "system", "content": system_prompt},

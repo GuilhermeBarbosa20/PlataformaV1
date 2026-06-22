@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Sequence
 from openai import OpenAI
 
 from agents.director_linkedin import profile_context_markdown
+from agents.director_prompts import director_voice_block, linkedin_organic_excellence_block
 from agents.director_strategy import (
     _parse_llm_json,
     normalize_strategy,
@@ -304,6 +305,8 @@ def optimization_has_content(report: Optional[Dict[str, Any]]) -> bool:
         return False
     if report.get("headline") or report.get("insights") or report.get("recommendations"):
         return True
+    if report.get("worked_well") or report.get("post_insights"):
+        return True
     return bool(report.get("objective_progress") or report.get("metric_deltas"))
 
 
@@ -396,11 +399,20 @@ def generate_optimization_report(
         Relatório estruturado para o painel e para ``apply_optimization_to_strategy``.
     """
 
+from agents.director_post_performance import (
+    build_post_performance_review,
+    performance_review_for_llm,
+    record_performance_snapshot,
+    timing_insights_from_analysis,
+)
+
     strategy = state.get("strategy") if isinstance(state.get("strategy"), dict) else {}
     baseline = state.get("linkedin_analysis_baseline")
     current = state.get("linkedin_analysis")
     calendar = state.get("linkedin_calendar")
 
+    record_performance_snapshot(state)
+    performance = build_post_performance_review(state)
     objective_progress = build_objective_progress(strategy, baseline, current)
     metric_deltas = compare_analysis_snapshots(baseline, current)
     execution = calendar_execution_summary(calendar)
@@ -413,23 +425,34 @@ def generate_optimization_report(
             "objective_progress": objective_progress,
             "metric_deltas": metric_deltas,
             "execution_summary": execution,
+            "post_performance": performance,
         },
         ensure_ascii=False,
         indent=2,
     )
 
     system_prompt = (
-        f"És o Diretor de Marketing AI — analista de performance LinkedIn orgânico. "
-        f"Responde em {language}. "
-        "Compara progresso real com a estratégia aprovada e propõe otimizações práticas "
-        "(pilares, cadência, formatos, táticas) sem mudar os objetivos finais do utilizador "
-        "a menos que os dados mostrem que são irrealistas — nesse caso explica no relatório. "
-        "O campo reply deve ter NO MÁXIMO 3 frases para o chat; detalhes só no objecto report. "
-        "Responde APENAS JSON válido:\n"
-        '{"reply":"<mensagem curta ao utilizador>",'
+        f"{director_voice_block(language)}\n"
+        f"{linkedin_organic_excellence_block()}\n"
+        "Papel: analista de performance LinkedIn orgânico. "
+        "O utilizador quer saber O QUE FUNCIONOU vs O QUE NÃO FUNCIONOU nos posts recentes "
+        "(formato, horário, extensão, valor entregue) e como ajustar os PRÓXIMOS posts "
+        "do calendário sem abandonar os objectivos SMART.\n"
+        "Usa post_performance.top_performers, underperformers e format_performance como base. "
+        "Para cada insight de post, indica hipótese de causa (hora, carrossel vs texto, etc.). "
+        "O campo reply: máx. 3 frases. JSON:\n"
+        '{"reply":"<mensagem curta>",'
         '"report":{'
-        '"headline":"<título do relatório>",'
+        '"headline":"<ex: «Texto curto com imagem liderou; posts longos ficaram abaixo»>",'
+        '"yesterday_summary":"<resumo do período analisado>",'
         '"overall_status":"on_track|behind|ahead|insufficient_data",'
+        '"worked_well":["..."],'
+        '"underperformed":["..."],'
+        '"post_insights":[{"post_preview":"...","format":"...","engagement":"...","verdict":"funcionou|fraco",'
+        '"likely_reason":"hora/formato/texto/CTA"}],'
+        '"format_insights":["..."],'
+        '"timing_insights":["..."],'
+        '"next_posts_adjustment":"<como mudar os próximos posts do calendário>",'
         '"insights":["..."],'
         '"recommendations":[{"area":"","action":"","priority":"alta|media|baixa"}],'
         '"strategy_adjustments":{'
@@ -445,11 +468,11 @@ def generate_optimization_report(
     user_prompt = (
         f"Estratégia aprovada:\n{strategy_brief or json.dumps(strategy, ensure_ascii=False)}\n\n"
         f"Contexto perfil actual:\n{profile_ctx or 'n/d'}\n\n"
-        f"Dados determinísticos já calculados (usa como base, não contradigas números):\n"
-        f"{deterministic_block}\n\n"
-        "Gera recomendações accionáveis para a próxima semana. "
-        "Em strategy_adjustments inclui pilares/cadência/táticas concretos quando fizer sentido; "
-        "se não houver dados suficientes, deixa listas vazias e overall_status=insufficient_data."
+        f"Dados determinísticos (não contradigas números):\n{deterministic_block}\n\n"
+        f"Resumo performance para LLM:\n{performance_review_for_llm(performance)}\n\n"
+        "Gera análise «ontem/período recente funcionou X, falhou Y» e recomendações "
+        "accionáveis para a próxima semana. Em strategy_adjustments ajusta pilares/cadência "
+        "com base no que funcionou nos formatos com melhor engagement."
     )
 
     response = client.chat.completions.create(
@@ -466,7 +489,7 @@ def generate_optimization_report(
     data = _parse_llm_json(raw)
     if not data:
         return _fallback_optimization_report(
-            objective_progress, metric_deltas, execution, language
+            objective_progress, metric_deltas, execution, language, performance=performance
         )
 
     report = data.get("report") if isinstance(data.get("report"), dict) else {}
@@ -474,8 +497,35 @@ def generate_optimization_report(
     report["objective_progress"] = objective_progress
     report["metric_deltas"] = metric_deltas
     report["execution_summary"] = execution
+    report["post_performance"] = performance
+    if not report.get("worked_well") and performance.get("top_performers"):
+        report["worked_well"] = [
+            f"{p.get('format', 'post')}: «{str(p.get('preview', ''))[:60]}» "
+            f"({p.get('reactions_total', '—')} reacções)"
+            for p in performance.get("top_performers", [])[:3]
+            if isinstance(p, dict)
+        ]
+    if not report.get("underperformed") and performance.get("underperformers"):
+        report["underperformed"] = [
+            f"{p.get('format', 'post')}: «{str(p.get('preview', ''))[:60]}» "
+            f"({p.get('reactions_total', '—')} reacções)"
+            for p in performance.get("underperformers", [])[:2]
+            if isinstance(p, dict)
+        ]
+    if not report.get("format_insights") and performance.get("format_performance"):
+        report["format_insights"] = [
+            f"{f.get('format')}: {f.get('avg_engagement_pct', 'n/d')}% engagement médio "
+            f"({f.get('verdict', 'neutral')})"
+            for f in performance.get("format_performance", [])[:4]
+            if isinstance(f, dict)
+        ]
+    timing_block = performance.get("timing_analysis")
+    if isinstance(timing_block, dict):
+        report["timing_analysis"] = timing_block
+        if not report.get("timing_insights"):
+            report["timing_insights"] = timing_insights_from_analysis(timing_block)
     if not report.get("headline"):
-        report["headline"] = "Relatório de progresso e otimização"
+        report["headline"] = "Análise de performance e optimização"
     reply = str(data.get("reply") or "").strip()
     return {"report": report, "reply": reply}
 
@@ -485,10 +535,13 @@ def _fallback_optimization_report(
     metric_deltas: List[Dict[str, Any]],
     execution: Dict[str, Any],
     language: str,
+    *,
+    performance: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Relatório mínimo quando o LLM falha."""
 
     _ = language
+    perf = performance if isinstance(performance, dict) else {}
     status = "insufficient_data"
     if objective_progress:
         statuses = {r.get("status") for r in objective_progress}
@@ -499,15 +552,32 @@ def _fallback_optimization_report(
         else:
             status = "on_track"
 
+    worked = [
+        f"{p.get('format', 'post')}: «{str(p.get('preview', ''))[:50]}»"
+        for p in (perf.get("top_performers") or [])[:3]
+        if isinstance(p, dict)
+    ]
+    under = [
+        f"{p.get('format', 'post')}: «{str(p.get('preview', ''))[:50]}»"
+        for p in (perf.get("underperformers") or [])[:2]
+        if isinstance(p, dict)
+    ]
+
     return {
-        "reply": "Comparei as métricas com a tua estratégia. Revê o relatório no painel.",
+        "reply": "Comparei posts, formatos e métricas com a tua estratégia. Revê o painel.",
         "report": {
             "generated_at": datetime.now(timezone.utc).isoformat(),
-            "headline": "Progresso vs objetivos",
+            "headline": "O que funcionou vs o que ficou aquém",
             "overall_status": status,
             "objective_progress": objective_progress,
             "metric_deltas": metric_deltas,
             "execution_summary": execution,
+            "post_performance": perf,
+            "worked_well": worked,
+            "underperformed": under,
+            "post_insights": [],
+            "format_insights": [],
+            "timing_insights": [],
             "insights": [],
             "recommendations": [],
             "strategy_adjustments": {},

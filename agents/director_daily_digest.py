@@ -13,6 +13,13 @@ from typing import Any, Dict, List, Optional
 
 from openai import OpenAI
 
+from agents.director_post_performance import (
+    build_post_performance_review,
+    performance_review_for_llm,
+    record_performance_snapshot,
+    timing_insights_from_analysis,
+)
+from agents.director_prompts import analysis_context_snippet, director_voice_block
 from agents.director_optimization import (
     calendar_execution_summary,
     generate_optimization_report,
@@ -80,24 +87,54 @@ def _build_light_digest_with_llm(
     )
     profiles = len(state.get("followed_profiles") or [])
 
+    record_performance_snapshot(state)
+    performance = build_post_performance_review(state)
+    performance_block = performance_review_for_llm(performance)
+
+    analysis_ctx = analysis_context_snippet(state.get("linkedin_analysis"))
+    engagement_log = state.get("engagement_log") or []
+    approved_comments = sum(
+        1 for e in engagement_log if isinstance(e, dict) and e.get("status") == "approved"
+    )
     system_prompt = (
-        f"És o Diretor de Marketing AI. Responde em {language}. "
-        "Gera um briefing matinal curto para o utilizador com base na estratégia "
-        "e no progresso editorial. Tom: profissional, directo, sem jargão vazio. "
-        "JSON: "
-        '{"headline":"...","summary":"2-4 frases","priorities":["..."],"focus_today":"uma acção concreta"}'
+        f"{director_voice_block(language)}\n"
+        "É o briefing matinal do director de marketing. O utilizador quer saber "
+        "O QUE FUNCIONOU ONTEM / NA ÚLTIMA ANÁLISE e O QUE FICOU AQUÉM — como um "
+        "analista que reviu posts, formatos e métricas face aos objectivos SMART.\n"
+        "Usa os dados de performance fornecidos; se faltarem dados por post, diz-o "
+        "claramente mas infere padrões (formato, cadência, execução do calendário).\n"
+        "JSON:\n"
+        '{"headline":"título tipo «Ontem X funcionou; hoje foca em Y»",'
+        '"summary":"2-4 frases directas sobre ontem/último período",'
+        '"worked_well":["o que funcionou — específico"],'
+        '"underperformed":["o que ficou aquém — específico"],'
+        '"post_insights":[{"post_preview":"...","format":"...","verdict":"funcionou|fraco|neutro",'
+        '"likely_reason":"hora/formato/texto/valor entregue"}],'
+        '"format_insights":["carrossel vs texto etc."],'
+        '"timing_insights":["cadência/horário se aplicável"],'
+        '"priorities":["máx 5 accionáveis para hoje"],'
+        '"focus_today":"uma acção concreta",'
+        '"next_posts_adjustment":"como ajustar os próximos posts do calendário"}'
     )
     user_prompt = (
         f"Estratégia:\n{brief[:4000]}\n\n"
         f"Calendário: {cal.get('posts_ready', 0)}/{cal.get('posts_total', 0)} posts prontos "
-        f"({cal.get('completion_pct', 0)}%).\n"
-        f"Perfis seguidos: {profiles}. Publicações na fila para comentar: {pending_comments}.\n"
-        "O que deve o utilizador priorizar hoje?"
+        f"({cal.get('completion_pct', 0)}%). Publicados: "
+        f"{(performance.get('calendar_review') or {}).get('published_count', 0)}.\n"
+        f"Perfis seguidos: {profiles}. Fila comentários: {pending_comments}. "
+        f"Comentários aprovados: {approved_comments}.\n\n"
+        f"Dados de performance (posts, formatos, deltas):\n{performance_block}\n"
+    )
+    if analysis_ctx:
+        user_prompt += f"\nContexto perfil:\n{analysis_ctx}\n"
+    user_prompt += (
+        "\nResponde como se estivesses a dizer ao cliente: «Ontem/analisámos o período recente "
+        "e isto é o que funcionou vs o que não funcionou». Sê concreto."
     )
     response = client.chat.completions.create(
         model=model,
-        temperature=0.35,
-        max_tokens=900,
+        temperature=0.42,
+        max_tokens=2200,
         response_format={"type": "json_object"},
         messages=[
             {"role": "system", "content": system_prompt},
@@ -107,13 +144,35 @@ def _build_light_digest_with_llm(
     raw = (response.choices[0].message.content or "").strip()
     data = _parse_llm_json(raw) or {}
     return {
-        "headline": str(data.get("headline") or "Briefing do dia").strip(),
+        "headline": str(data.get("headline") or "Análise de ontem").strip(),
         "summary": str(data.get("summary") or "").strip(),
+        "worked_well": [
+            str(w).strip() for w in (data.get("worked_well") or []) if str(w).strip()
+        ][:5],
+        "underperformed": [
+            str(u).strip() for u in (data.get("underperformed") or []) if str(u).strip()
+        ][:5],
+        "post_insights": [
+            p for p in (data.get("post_insights") or []) if isinstance(p, dict)
+        ][:6],
+        "format_insights": [
+            str(f).strip() for f in (data.get("format_insights") or []) if str(f).strip()
+        ][:5],
+        "timing_insights": [
+            str(t).strip() for t in (data.get("timing_insights") or []) if str(t).strip()
+        ][:4],
         "priorities": [
             str(p).strip() for p in (data.get("priorities") or []) if str(p).strip()
         ][:5],
         "focus_today": str(data.get("focus_today") or "").strip(),
+        "next_posts_adjustment": str(data.get("next_posts_adjustment") or "").strip(),
+        "timing_analysis": performance.get("timing_analysis") or {},
+        "timing_insights": timing_insights_from_analysis(performance.get("timing_analysis") or {})
+        or [
+            str(t).strip() for t in (data.get("timing_insights") or []) if str(t).strip()
+        ][:5],
         "execution_summary": cal,
+        "post_performance": performance,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "source": "light",
     }
@@ -142,6 +201,8 @@ def run_daily_digest(
     """
 
     state["last_daily_digest_at"] = today_utc_date()
+    record_performance_snapshot(state)
+    performance = build_post_performance_review(state)
     has_analysis = isinstance(state.get("linkedin_analysis"), dict)
 
     if has_analysis and strategy_has_core_content(state.get("strategy") or {}):
@@ -149,16 +210,27 @@ def run_daily_digest(
         report = opt.get("report") if isinstance(opt.get("report"), dict) else {}
         if optimization_has_content(report):
             state["optimization_report"] = report
+            worked = report.get("worked_well") or []
+            under = report.get("underperformed") or []
             state["daily_digest"] = {
-                "headline": str(report.get("headline") or "Análise diária").strip(),
-                "summary": str(opt.get("reply") or "").strip(),
+                "headline": str(report.get("headline") or "Análise de ontem").strip(),
+                "summary": str(opt.get("reply") or report.get("yesterday_summary") or "").strip(),
+                "worked_well": worked if isinstance(worked, list) else [],
+                "underperformed": under if isinstance(under, list) else [],
+                "post_insights": report.get("post_insights") or [],
+                "format_insights": report.get("format_insights") or [],
+                "timing_insights": report.get("timing_insights")
+                or timing_insights_from_analysis(report.get("timing_analysis") or performance),
+                "timing_analysis": report.get("timing_analysis") or performance.get("timing_analysis") or {},
                 "priorities": [
                     str(r.get("action") or "").strip()
                     for r in (report.get("recommendations") or [])
                     if isinstance(r, dict) and r.get("action")
                 ][:5],
                 "focus_today": str((report.get("strategy_adjustments") or {}).get("summary") or "").strip(),
+                "next_posts_adjustment": str(report.get("next_posts_adjustment") or "").strip(),
                 "execution_summary": report.get("execution_summary") or {},
+                "post_performance": report.get("post_performance") or performance,
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "source": "optimization",
             }
@@ -167,10 +239,14 @@ def run_daily_digest(
                 "approve_optimization",
                 "dismiss_optimization",
             ]
-            headline = state["daily_digest"].get("headline") or "Análise diária"
+            headline = state["daily_digest"].get("headline") or "Análise de ontem"
+            worked = state["daily_digest"].get("worked_well") or []
+            worked_hint = ""
+            if worked:
+                worked_hint = f" Destaque: {worked[0]}."
             reply = (
-                f"**Bom dia.** Analisei o progresso face à estratégia — {headline}. "
-                "Revê o relatório no painel; podes aplicar optimizações ou manter o plano actual."
+                f"**Bom dia.** Revisei o que funcionou ontem/no período recente — {headline}.{worked_hint} "
+                "Vê o detalhe por post e formato no painel; podes aplicar optimizações ou manter o plano."
             )
             return {
                 "reply": reply,
@@ -184,14 +260,24 @@ def run_daily_digest(
     state["stage"] = "daily_digest_review"
     state["pending_actions"] = []
     priorities = digest.get("priorities") or []
+    worked = digest.get("worked_well") or []
+    under = digest.get("underperformed") or []
     prio_text = ""
     if priorities:
-        prio_text = "\n\n**Prioridades:**\n" + "\n".join(f"• {p}" for p in priorities[:3])
+        prio_text = "\n\n**Prioridades hoje:**\n" + "\n".join(f"• {p}" for p in priorities[:3])
+    worked_text = ""
+    if worked:
+        worked_text = "\n\n**O que funcionou:**\n" + "\n".join(f"• {w}" for w in worked[:3])
+    under_text = ""
+    if under:
+        under_text = "\n\n**O que ficou aquém:**\n" + "\n".join(f"• {u}" for u in under[:2])
     focus = digest.get("focus_today")
     focus_text = f"\n\n**Foco de hoje:** {focus}" if focus else ""
+    adjust = digest.get("next_posts_adjustment")
+    adjust_text = f"\n\n**Próximos posts:** {adjust}" if adjust else ""
     reply = (
-        f"**Bom dia.** {digest.get('summary') or 'Revê o painel para o plano do dia.'}"
-        f"{prio_text}{focus_text}"
+        f"**Bom dia.** {digest.get('summary') or 'Revê o painel para a análise de ontem.'}"
+        f"{worked_text}{under_text}{prio_text}{focus_text}{adjust_text}"
     ).strip()
     return {
         "reply": reply,

@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 
 from openai import OpenAI
 
+from agents.director_prompts import director_voice_block, linkedin_organic_excellence_block
 from agents.director_strategy import _parse_llm_json, strategy_brief_for_execution
 from agents.social_media import canonicalize_linkedin_profile_url
 
@@ -173,7 +174,8 @@ def suggest_followed_profiles_from_strategy(
     n = max(1, min(8, int(count)))
 
     system_prompt = (
-        f"És o Diretor de Marketing AI — especialista em LinkedIn B2B em {language}. "
+        f"{director_voice_block(language)}\n"
+        f"{linkedin_organic_excellence_block()}\n"
         "Com base na estratégia do utilizador, sugere perfis LinkedIn onde comentar "
         "publicações de terceiros gera autoridade e networking no nicho certo. "
         "Prioriza: líderes de opinião, fundadores, CMOs, especialistas reconhecidos "

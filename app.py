@@ -34,6 +34,11 @@ from agents.linkedin_calendar_db import (
     normalize_calendar_posts_for_storage,
     upsert_user_linkedin_calendar_posts_to_database,
 )
+from agents.linkedin_followed_profiles_db import (
+    fetch_user_linkedin_followed_profiles_from_database,
+    normalize_followed_profiles_for_storage,
+    upsert_user_linkedin_followed_profiles_to_database,
+)
 from agents.linkedin_publish_auth_db import (
     clear_user_linkedin_publish_oauth_from_database,
     fetch_user_linkedin_publish_oauth_from_database,
@@ -661,6 +666,28 @@ class LinkedInCalendarPostsSaveRequest(BaseModel):
     supabase_access_token: str = Field(..., min_length=20)
     posts: List[Dict[str, Any]] = Field(default_factory=list)
     week_start: Optional[str] = Field(None, max_length=10)
+
+
+class LinkedInFollowedProfilesLoadRequest(BaseModel):
+    """Pedido para carregar perfis LinkedIn seguidos guardados na BD.
+
+    Argumentos:
+        supabase_access_token: JWT da sessão Supabase (obrigatório).
+    """
+
+    supabase_access_token: str = Field(..., min_length=20)
+
+
+class LinkedInFollowedProfilesSaveRequest(BaseModel):
+    """Pedido para gravar perfis LinkedIn seguidos na BD.
+
+    Argumentos:
+        supabase_access_token: JWT da sessão.
+        profiles: Lista de perfis (``id``, ``profile_url``, ``display_name``).
+    """
+
+    supabase_access_token: str = Field(..., min_length=20)
+    profiles: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class LinkedInGeneratePostsRequest(BaseModel):
@@ -1417,7 +1444,11 @@ class MarketingDirector:
                 "OPENAI_API_KEY nao configurada no servidor. Define a variavel de ambiente para usar a chatroom do Diretor."
             )
 
-        model = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
+        model = (
+            os.getenv("DIRECTOR_AI_MODEL", "").strip()
+            or os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
+            or "gpt-4o-mini"
+        )
         return process_director_turn(
             messages=messages,
             language=language,
@@ -2119,6 +2150,7 @@ def home() -> str:
           .li-btn-analyze { background: linear-gradient(180deg, #10b981, #059669); }
           .li-btn-logout { background: linear-gradient(180deg, #64748b, #475569); }
           .li-btn-optimize { background: linear-gradient(180deg, #a855f7, #7c3aed); }
+          .li-btn-briefing { background: linear-gradient(180deg, #38bdf8, #0284c7); }
           .linkedin-profile-hint { margin: 0 0 8px; font-size: 0.8rem; color: #94a3b8; min-height: 1.2em; }
           .optimization-panel {
             margin-top: 12px;
@@ -2282,6 +2314,33 @@ def home() -> str:
             background: rgba(69, 26, 3, 0.2);
           }
           .director-collapse--engagement .director-collapse-summary { color: #fcd34d; }
+          .director-collapse--digest {
+            border-top-color: rgba(56, 189, 248, 0.45);
+          }
+          .director-collapse--digest .director-collapse-summary { color: #7dd3fc; }
+          .digest-worked { color: #6ee7b7; }
+          .digest-under { color: #fca5a5; }
+          .digest-post-row {
+            margin: 6px 0;
+            padding: 8px 10px;
+            border-radius: 8px;
+            background: rgba(15, 23, 42, 0.45);
+            font-size: 0.82rem;
+          }
+          .digest-post-row strong { color: #e2e8f0; }
+          .timing-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.8rem;
+            margin-top: 6px;
+          }
+          .timing-table th, .timing-table td {
+            padding: 6px 8px;
+            text-align: left;
+            border-bottom: 1px solid rgba(148, 163, 184, 0.2);
+          }
+          .timing-table th { color: #94a3b8; font-weight: 600; }
+          .timing-table tr:first-child td { color: #6ee7b7; font-weight: 600; }
           .stage-hint {
             margin: 0 0 12px;
             color: #94a3b8;
@@ -2319,6 +2378,7 @@ def home() -> str:
               <div class="linkedin-auth-actions">
                 <button type="button" class="li-btn li-btn-login" id="btnDirectorLinkedinLogin" onclick="startDirectorLinkedinLogin()">Ligar LinkedIn</button>
                 <button type="button" class="li-btn li-btn-analyze" id="btnDirectorAnalyze" onclick="runDirectorLinkedinAnalysis()" disabled>Analisar perfil</button>
+                <button type="button" class="li-btn li-btn-briefing" id="btnDirectorBriefing" onclick="runDailyDigest()" disabled style="display:none">Análise de ontem</button>
                 <button type="button" class="li-btn li-btn-optimize" id="btnDirectorOptimize" onclick="runDirectorReanalyzeAndOptimize()" disabled style="display:none">Reanalisar e otimizar</button>
                 <button type="button" class="li-btn li-btn-logout" id="btnDirectorLinkedinLogout" onclick="endDirectorLinkedinSession()" style="display:none">Terminar sessão</button>
               </div>
@@ -2473,10 +2533,71 @@ def home() -> str:
             return t;
           }
 
+          function mergeFollowedProfilesByUrl(localList, remoteList) {
+            const byUrl = new Map();
+            const add = (p) => {
+              if (!p || typeof p !== "object") return;
+              const url = String(p.profile_url || "").trim();
+              if (!url) return;
+              const key = url.replace(/\/+$/, "").toLowerCase();
+              if (!byUrl.has(key)) byUrl.set(key, { ...p, profile_url: url });
+            };
+            (remoteList || []).forEach(add);
+            (localList || []).forEach(add);
+            return Array.from(byUrl.values());
+          }
+
+          async function loadFollowedProfilesFromDatabase() {
+            if (!directorLinkedinSession || !directorLinkedinSession.access_token) return;
+            try {
+              const resp = await fetch("/agents/linkedin/followed-profiles/load", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  supabase_access_token: directorLinkedinSession.access_token,
+                }),
+              });
+              const data = await resp.json();
+              if (!resp.ok || !Array.isArray(data.profiles)) return;
+              if (!workflowState) workflowState = {};
+              const local = workflowState.followed_profiles || [];
+              const merged = mergeFollowedProfilesByUrl(local, data.profiles);
+              if (merged.length || data.found) {
+                workflowState.followed_profiles = merged;
+                saveWorkflowState();
+                renderDirectorPanel({
+                  orchestration_mode: workflowState.stage || "idle",
+                  deliverables: { followed_profiles: merged },
+                  workflow_state: workflowState,
+                });
+              }
+            } catch (e) {
+              console.warn("loadFollowedProfilesFromDatabase:", e);
+            }
+          }
+
+          async function saveFollowedProfilesToDatabase() {
+            if (!directorLinkedinSession || !directorLinkedinSession.access_token) return;
+            const profiles = (workflowState && workflowState.followed_profiles) || [];
+            try {
+              await fetch("/agents/linkedin/followed-profiles/save", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  supabase_access_token: directorLinkedinSession.access_token,
+                  profiles,
+                }),
+              });
+            } catch (e) {
+              console.warn("saveFollowedProfilesToDatabase:", e);
+            }
+          }
+
           async function applyDirectorResponse(data) {
             if (data.workflow_state) {
               workflowState = data.workflow_state;
               saveWorkflowState();
+              void saveFollowedProfilesToDatabase();
             }
             addMessage("assistant", sanitizeChatReply(data.reply));
             renderDirectorPanel(data);
@@ -2543,6 +2664,7 @@ def home() -> str:
             const label = document.getElementById("linkedinAuthLabel");
             const loginBtn = document.getElementById("btnDirectorLinkedinLogin");
             const analyzeBtn = document.getElementById("btnDirectorAnalyze");
+            const briefingBtn = document.getElementById("btnDirectorBriefing");
             const optimizeBtn = document.getElementById("btnDirectorOptimize");
             const logoutBtn = document.getElementById("btnDirectorLinkedinLogout");
             const hint = document.getElementById("linkedinProfileHint");
@@ -2566,6 +2688,10 @@ def home() -> str:
               || (workflowState.strategy.content_pillars && workflowState.strategy.content_pillars.length)
               || workflowState.strategy.summary
             );
+            if (briefingBtn) {
+              briefingBtn.style.display = connected && hasStrategy ? "" : "none";
+              briefingBtn.disabled = !connected || !hasStrategy;
+            }
             if (optimizeBtn) {
               optimizeBtn.style.display = connected && hasStrategy ? "" : "none";
               optimizeBtn.disabled = !connected || !hasStrategy;
@@ -2578,6 +2704,7 @@ def home() -> str:
                 void syncDirectorPublishAuthFromServer(directorLinkedinSession).then((ok) => {
                   directorPublishAuthorizedServer = ok || !!getDirectorPublishToken();
                 });
+                void loadFollowedProfilesFromDatabase();
               }
             } else if (hint) {
               hint.textContent = "";
@@ -2654,9 +2781,10 @@ def home() -> str:
                 apify_enrichment: {
                   content_type_distribution: enrichment.content_type_distribution || enrichment.format_distribution,
                   posting_cadence: enrichment.posting_cadence,
-                  top_posts: (enrichment.top_posts || []).slice(0, 3),
+                  top_posts: (enrichment.top_posts || []).slice(0, 8),
                 },
               },
+              recent_posts: (profile.recent_posts || enrichment.recent_posts || []).slice(0, 15),
             };
           }
 
@@ -3273,6 +3401,29 @@ def home() -> str:
             const deltaHtml = deltas ? `<ul class="strategy-list">${deltas}</ul>` : "";
             const insights = (report.insights || []).map((i) => `<li>${escapeHtml(i)}</li>`).join("");
             const insightsHtml = insights ? `<div class="strategy-section"><h5>Insights</h5><ul class="strategy-list">${insights}</ul></div>` : "";
+            const workedSection = renderDigestListItems(report.worked_well, "digest-worked");
+            const workedBlock = workedSection
+              ? `<div class="strategy-section"><h5>O que funcionou</h5>${workedSection}</div>` : "";
+            const underSection = renderDigestListItems(report.underperformed, "digest-under");
+            const underBlock = underSection
+              ? `<div class="strategy-section"><h5>O que ficou aquém</h5>${underSection}</div>` : "";
+            const postPerfBlock = renderPostInsightsBlock(report.post_insights);
+            const formatLines = (report.format_insights || []).map((f) => `<li>${escapeHtml(f)}</li>`).join("");
+            const formatBlock = formatLines
+              ? `<div class="strategy-section"><h5>Performance por formato</h5><ul class="strategy-list">${formatLines}</ul></div>` : "";
+            const timingBlock = renderTimingAnalysisBlock(
+              report.timing_analysis
+              || (report.post_performance && report.post_performance.timing_analysis)
+            );
+            const timingLines = (!timingBlock && (report.timing_insights || []).length)
+              ? (report.timing_insights || []).map((t) => `<li>${escapeHtml(t)}</li>`).join("")
+              : "";
+            const timingBlockOrList = timingBlock || (timingLines
+              ? `<div class="strategy-section"><h5>Horário / cadência</h5><ul class="strategy-list">${timingLines}</ul></div>`
+              : "");
+            const nextAdj = report.next_posts_adjustment
+              ? `<div class="strategy-section"><h5>Ajuste aos próximos posts</h5><p class="post-meta">${escapeHtml(report.next_posts_adjustment)}</p></div>`
+              : "";
             const recs = (report.recommendations || []).map((r) => {
               const pri = String(r.priority || "").toLowerCase();
               const cls = pri === "alta" ? "opt-priority-alta" : pri === "media" ? "opt-priority-media" : "";
@@ -3296,6 +3447,12 @@ def home() -> str:
                 ${execHtml}
                 ${objTable}
                 ${deltaHtml ? `<div class="strategy-section"><h5>Variação de métricas</h5>${deltaHtml}</div>` : ""}
+                ${workedBlock}
+                ${underBlock}
+                ${postPerfBlock}
+                ${formatBlock}
+                ${timingBlockOrList}
+                ${nextAdj}
                 ${insightsHtml}
                 ${recHtml}
                 ${adjSummary}
@@ -3438,23 +3595,113 @@ def home() -> str:
             );
           }
 
+          function renderDigestListItems(items, cssClass) {
+            const list = (items || []).filter(Boolean);
+            if (!list.length) return "";
+            const body = list.map((i) => `<li>${escapeHtml(String(i))}</li>`).join("");
+            return `<div class="${cssClass}"><ul class="strategy-list">${body}</ul></div>`;
+          }
+
+          function renderTimingAnalysisBlock(timing) {
+            if (!timing || typeof timing !== "object") return "";
+            const days = Array.isArray(timing.best_weekdays) ? timing.best_weekdays : [];
+            const hours = Array.isArray(timing.best_hours) ? timing.best_hours : [];
+            if (!days.length && !hours.length) return "";
+            const tz = timing.timezone === "Europe/Lisbon" ? " (hora de Lisboa)" : "";
+            let html = "";
+            if (days.length) {
+              const dayRows = days.map((d, i) => `<tr>
+                <td>${i === 0 ? "★ " : ""}${escapeHtml(d.day || d.day_short || "")}</td>
+                <td>${escapeHtml(String(d.avg_score != null ? d.avg_score : "—"))}</td>
+                <td>${escapeHtml(String(d.post_count || 0))} posts</td>
+              </tr>`).join("");
+              html += `<div class="strategy-section"><h5>Melhores dias da semana${tz}</h5>
+                <table class="timing-table"><thead><tr><th>Dia</th><th>Score médio</th><th>Amostra</th></tr></thead>
+                <tbody>${dayRows}</tbody></table></div>`;
+            }
+            if (hours.length) {
+              const hourRows = hours.map((h, i) => `<tr>
+                <td>${i === 0 ? "★ " : ""}${escapeHtml(h.hour_label || h.hour_range || "")}</td>
+                <td>${escapeHtml(String(h.avg_score != null ? h.avg_score : "—"))}</td>
+                <td>${escapeHtml(String(h.post_count || 0))} posts</td>
+              </tr>`).join("");
+              html += `<div class="strategy-section"><h5>Melhores horários${tz}</h5>
+                <table class="timing-table"><thead><tr><th>Hora</th><th>Score médio</th><th>Amostra</th></tr></thead>
+                <tbody>${hourRows}</tbody></table></div>`;
+            }
+            const insights = (timing.timing_insights || []).map((t) => `<li>${escapeHtml(t)}</li>`).join("");
+            if (insights) {
+              html += `<ul class="strategy-list" style="margin-top:8px">${insights}</ul>`;
+            }
+            return html;
+          }
+
+          function renderPostInsightsBlock(insights) {
+            const rows = (insights || []).filter((p) => p && typeof p === "object");
+            if (!rows.length) return "";
+            const html = rows.map((p) => {
+              const verdict = String(p.verdict || p.bucket || "").toLowerCase();
+              const cls = verdict.includes("fraco") || verdict === "weak" ? "digest-under" : "digest-worked";
+              const preview = p.post_preview || p.preview || "";
+              const reason = p.likely_reason || "";
+              const when = (p.posted_weekday || p.posted_hour)
+                ? `<span class="post-meta">${escapeHtml([p.posted_weekday, p.posted_hour].filter(Boolean).join(" · "))}</span><br>`
+                : "";
+              return `<div class="digest-post-row ${cls}">
+                <strong>${escapeHtml(String(p.format || "post"))}</strong>
+                — ${escapeHtml(String(preview).slice(0, 120))}
+                <br>${when}
+                ${reason ? `<span class="post-meta">${escapeHtml(reason)}</span>` : ""}
+              </div>`;
+            }).join("");
+            return `<div class="strategy-section"><h5>Por publicação</h5>${html}</div>`;
+          }
+
           function renderDailyDigestPanel(digest, mode) {
             if (!digest || (!digest.headline && !digest.summary)) return "";
+            const workedHtml = renderDigestListItems(digest.worked_well, "digest-worked");
+            const workedSection = workedHtml
+              ? `<div class="strategy-section"><h5>O que funcionou</h5>${workedHtml}</div>` : "";
+            const underHtml = renderDigestListItems(digest.underperformed, "digest-under");
+            const underSection = underHtml
+              ? `<div class="strategy-section"><h5>O que ficou aquém</h5>${underHtml}</div>` : "";
+            const formatLines = (digest.format_insights || []).map((f) => `<li>${escapeHtml(f)}</li>`).join("");
+            const formatSection = formatLines
+              ? `<div class="strategy-section"><h5>Formatos</h5><ul class="strategy-list">${formatLines}</ul></div>` : "";
+            const timingBlock = renderTimingAnalysisBlock(
+              digest.timing_analysis || (digest.post_performance && digest.post_performance.timing_analysis)
+            );
+            const timingLines = (!timingBlock && (digest.timing_insights || []).length)
+              ? (digest.timing_insights || []).map((t) => `<li>${escapeHtml(t)}</li>`).join("")
+              : "";
+            const timingSection = timingBlock || (timingLines
+              ? `<div class="strategy-section"><h5>Horário / cadência</h5><ul class="strategy-list">${timingLines}</ul></div>`
+              : "");
+            const postInsights = renderPostInsightsBlock(digest.post_insights);
             const priorities = (digest.priorities || []).map((p) => `<li>${escapeHtml(p)}</li>`).join("");
-            const prioHtml = priorities ? `<ul class="strategy-list">${priorities}</ul>` : "";
+            const prioHtml = priorities ? `<div class="strategy-section"><h5>Prioridades hoje</h5><ul class="strategy-list">${priorities}</ul></div>` : "";
             const focus = digest.focus_today
               ? `<p class="post-meta"><strong>Foco de hoje:</strong> ${escapeHtml(digest.focus_today)}</p>`
               : "";
+            const adjust = digest.next_posts_adjustment
+              ? `<p class="post-meta"><strong>Próximos posts:</strong> ${escapeHtml(digest.next_posts_adjustment)}</p>`
+              : "";
             const body = `
                 <p class="post-meta">${escapeHtml(digest.summary || "")}</p>
+                ${workedSection}
+                ${underSection}
+                ${postInsights}
+                ${formatSection}
+                ${timingSection}
                 ${focus}
+                ${adjust}
                 ${prioHtml}
                 <div class="workflow-actions">
-                  <button type="button" class="wf-btn wf-btn-secondary" onclick="runDailyDigest()">Actualizar briefing</button>
+                  <button type="button" class="wf-btn wf-btn-secondary" onclick="runDailyDigest()">Actualizar análise</button>
                 </div>`;
             return wrapDirectorCollapsiblePanel(
               "daily_digest",
-              digest.headline || "Briefing do dia",
+              digest.headline || "Análise de ontem",
               body,
               mode === "daily_digest_review" || mode === "optimization_review",
               "director-collapse--digest"
@@ -3592,7 +3839,7 @@ def home() -> str:
               strategy_brief: "Brief estratégico",
               strategy_review: "Revisão de estratégia",
               strategy_approved: "Estratégia aprovada",
-              optimization_review: "Análise e optimização",
+              optimization_review: "Análise de ontem e optimização",
               posts_review: "Calendário de posts",
               planning: "Planeamento",
               copy_review: "Revisão de copy",
@@ -3601,7 +3848,7 @@ def home() -> str:
               publish_confirm: "Publicar no LinkedIn",
               engagement_review: "Comentário (aprovação)",
               engagement_batch_review: "Lote de comentários",
-              daily_digest_review: "Briefing do dia",
+              daily_digest_review: "Análise de ontem",
               followed_feed: "Publicações de perfis seguidos",
               completed: "Concluído",
               redirect: "Encaminhamento",
@@ -3611,7 +3858,7 @@ def home() -> str:
               strategy_brief: "Ainda faltam dados. Completa objetivos SMART, ICP e métricas no chat.",
               strategy_review: "Plano estratégico abaixo. Aprova ou pede ajustes antes dos posts.",
               strategy_approved: "Estratégia fechada. Inicia a execução ou reanalisa para optimizar.",
-              optimization_review: "Compara progresso com os objetivos. Aplica ou ignora os ajustes propostos.",
+              optimization_review: "Compara o que funcionou vs o que ficou aquém. Aplica ou ignora os ajustes.",
               posts_review: "Escolhe o próximo post no calendário para rever copy e imagem.",
               planning: "Indica objetivo, público e tom. LinkedIn só entra se o pedires explicitamente.",
               copy_review: calendar.length
@@ -3622,7 +3869,7 @@ def home() -> str:
               publish_confirm: "Autoriza a publicação OAuth e publica o post, ou avança sem publicar.",
               engagement_review: "Comentário para uma publicação de alguém que segues — aprova ou reprova.",
               engagement_batch_review: "Revê o lote de comentários — marca, edita e aprova os que quiseres.",
-              daily_digest_review: "Briefing diário com prioridades e foco de hoje.",
+              daily_digest_review: "O que funcionou ontem, o que ficou aquém e o foco de hoje.",
               followed_feed: "Escolhe uma publicação para eu sugerir um comentário.",
               completed: "Semana ou post concluídos. Podes comentar em perfis que segues ou reanalisar.",
               redirect: "Este pedido é do agente especializado — continua na página dele.",
@@ -3886,7 +4133,8 @@ def home() -> str:
             return String(ws.last_daily_digest_at || "") !== today;
           }
 
-          window.runDailyDigest = () => directorAction("run_daily_digest", {}, "Briefing diário.");
+          window.runDailyDigest = () => directorAction("run_daily_digest", {}, "Análise de ontem — o que funcionou e o que ajustar.");
+          window.loadFollowedProfilesFromDatabase = loadFollowedProfilesFromDatabase;
           window.generateEngagementBatch = () => directorAction(
             "generate_engagement_batch",
             { count: 10 },
@@ -4654,6 +4902,122 @@ def linkedin_calendar_posts_save(payload: LinkedInCalendarPostsSaveRequest) -> D
     return {"ok": True, "saved_to_database": True, "count": len(cleaned)}
 
 
+def _linkedin_followed_profiles_from_database(access_token: str) -> Optional[List[Dict[str, Any]]]:
+    """Lê perfis seguidos da BD para o token Supabase dado."""
+
+    sup_url, sup_anon = get_supabase_public_credentials()
+    if not sup_url or not sup_anon:
+        return None
+    try:
+        return fetch_user_linkedin_followed_profiles_from_database(access_token, sup_url, sup_anon)
+    except (error.HTTPError, error.URLError, OSError, TypeError):
+        return None
+
+
+def _save_linkedin_followed_profiles_to_database(
+    access_token: str,
+    user: Dict[str, Any],
+    profiles: List[Dict[str, Any]],
+) -> bool:
+    """Grava perfis seguidos na Supabase."""
+
+    sup_url, sup_anon = get_supabase_public_credentials()
+    if not sup_url or not sup_anon:
+        return False
+    uid = str(user.get("id") or "").strip()
+    if not uid:
+        return False
+    cleaned = normalize_followed_profiles_for_storage(profiles)
+    try:
+        return upsert_user_linkedin_followed_profiles_to_database(
+            access_token,
+            sup_url,
+            sup_anon,
+            uid,
+            cleaned,
+        )
+    except (error.HTTPError, error.URLError, OSError, TypeError):
+        return False
+
+
+@app.post("/agents/linkedin/followed-profiles/load")
+def linkedin_followed_profiles_load(payload: LinkedInFollowedProfilesLoadRequest) -> Dict[str, Any]:
+    """Carrega perfis LinkedIn seguidos guardados para o utilizador autenticado.
+
+    Argumentos:
+        payload: Token de sessão Supabase.
+
+    Retorno:
+        ``profiles``, ``found``, ``count``.
+
+    Raises:
+        HTTPException: 401 sessão inválida.
+    """
+
+    sup_url, sup_anon = get_supabase_public_credentials()
+    if not sup_url or not sup_anon:
+        raise HTTPException(
+            status_code=503,
+            detail="SUPABASE_URL / SUPABASE_ANON_KEY não configurados no servidor.",
+        )
+    access_tok = payload.supabase_access_token.strip()
+    try:
+        fetch_supabase_auth_user(access_tok, sup_url, sup_anon)
+    except error.HTTPError as exc:
+        raise HTTPException(status_code=401, detail="Sessão Supabase inválida ou expirada.") from exc
+    except (error.URLError, OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=502, detail=f"Erro ao validar sessão: {exc!s}") from exc
+
+    profiles = _linkedin_followed_profiles_from_database(access_tok)
+    if profiles is None:
+        return {"found": False, "profiles": [], "count": 0}
+    return {
+        "found": len(profiles) > 0,
+        "profiles": profiles,
+        "count": len(profiles),
+    }
+
+
+@app.post("/agents/linkedin/followed-profiles/save")
+def linkedin_followed_profiles_save(payload: LinkedInFollowedProfilesSaveRequest) -> Dict[str, Any]:
+    """Grava perfis LinkedIn seguidos na base de dados Supabase.
+
+    Argumentos:
+        payload: Token e lista de perfis.
+
+    Retorno:
+        ``ok``, ``saved_to_database``, ``count``.
+
+    Raises:
+        HTTPException: 401 sessão inválida; 502 falha ao gravar.
+    """
+
+    sup_url, sup_anon = get_supabase_public_credentials()
+    if not sup_url or not sup_anon:
+        raise HTTPException(
+            status_code=503,
+            detail="SUPABASE_URL / SUPABASE_ANON_KEY não configurados no servidor.",
+        )
+    access_tok = payload.supabase_access_token.strip()
+    try:
+        user = fetch_supabase_auth_user(access_tok, sup_url, sup_anon)
+    except error.HTTPError as exc:
+        raise HTTPException(status_code=401, detail="Sessão Supabase inválida ou expirada.") from exc
+    except (error.URLError, OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=502, detail=f"Erro ao validar sessão: {exc!s}") from exc
+
+    profiles = payload.profiles if isinstance(payload.profiles, list) else []
+    saved = _save_linkedin_followed_profiles_to_database(access_tok, user, profiles)
+    if not saved:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Não foi possível guardar os perfis na base de dados. "
+                "Executa migrations/006_user_linkedin_followed_profiles.sql no Supabase."
+            ),
+        )
+    cleaned = normalize_followed_profiles_for_storage(profiles)
+    return {"ok": True, "saved_to_database": True, "count": len(cleaned)}
 
 
 def _slim_linkedin_profile_for_post_generation(profile: Optional[Dict[str, Any]]) -> Dict[str, Any]:
