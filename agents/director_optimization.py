@@ -399,12 +399,12 @@ def generate_optimization_report(
         Relatório estruturado para o painel e para ``apply_optimization_to_strategy``.
     """
 
-from agents.director_post_performance import (
-    build_post_performance_review,
-    performance_review_for_llm,
-    record_performance_snapshot,
-    timing_insights_from_analysis,
-)
+    from agents.director_post_performance import (
+        build_post_performance_review,
+        performance_review_for_llm,
+        record_performance_snapshot,
+        timing_insights_from_analysis,
+    )
 
     strategy = state.get("strategy") if isinstance(state.get("strategy"), dict) else {}
     baseline = state.get("linkedin_analysis_baseline")
