@@ -2469,9 +2469,9 @@ def home() -> str:
             };
             const example = hints[stage] || "continua onde parei";
             result.innerHTML = (
-              "<p class=\"hint\">Tens uma sessão guardada neste browser. "
-              + "O painel só aparece quando pedires no chat — por exemplo: «"
-              + escapeHtml(example) + "».</p>"
+              '<p class="hint">Tens uma sessão guardada neste browser. '
+              + 'O painel só aparece quando pedires no chat — por exemplo: «'
+              + escapeHtml(example) + '».</p>'
             );
           }
 
