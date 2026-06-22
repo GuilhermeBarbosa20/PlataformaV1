@@ -2434,6 +2434,8 @@ def home() -> str:
             ws.linkedin_analysis_baseline = null;
             ws.optimization_report = null;
             ws.daily_digest = null;
+            ws.strategy = null;
+            ws.execution_plan = "";
             ws.linkedin_posts = [];
             ws.linkedin_calendar = [];
             ws.post = null;
@@ -2442,19 +2444,18 @@ def home() -> str:
             ws.engagement_draft = null;
             ws.engagement_batch = [];
             ws.followed_posts_queue = [];
+            if (Array.isArray(ws.channels)) {
+              ws.channels = ws.channels.filter((c) => String(c).toLowerCase() !== "linkedin");
+            }
             const linkedinStages = new Set([
+              "strategy_brief", "strategy_review", "strategy_approved",
               "optimization_review", "daily_digest_review", "posts_review",
               "copy_review", "image_confirm", "image_review", "publish_confirm",
               "followed_feed", "engagement_review", "engagement_batch_review",
             ]);
             const stage = String(ws.stage || "idle");
             if (linkedinStages.has(stage)) {
-              const hasStrategy = ws.strategy && (
-                (ws.strategy.smart_objectives && ws.strategy.smart_objectives.length)
-                || (ws.strategy.content_pillars && ws.strategy.content_pillars.length)
-                || ws.strategy.summary
-              );
-              ws.stage = hasStrategy ? "strategy_review" : "idle";
+              ws.stage = "idle";
             }
           }
 
@@ -3570,16 +3571,12 @@ def home() -> str:
             const ws = workflowState || {};
             const d = deliverables || {};
             const sessionOk = directorLinkedinSessionActive() || Boolean(ws.linkedin_connected);
-            const hasStrategy = directorHasStrategy(ws, d);
             const linkedinModes = new Set([
               "strategy_brief", "strategy_review", "strategy_approved",
               "optimization_review", "daily_digest_review", "posts_review", "publish_confirm",
               "followed_feed", "engagement_review", "engagement_batch_review"
             ]);
             if (!sessionOk) {
-              if (hasStrategy && ["strategy_brief", "strategy_review", "strategy_approved"].includes(mode)) {
-                return true;
-              }
               return false;
             }
             if (linkedinModes.has(mode)) return true;
@@ -3941,11 +3938,9 @@ def home() -> str:
             }[mode] || "";
 
             const linkedinContext = isDirectorLinkedinContext(mode, ws, deliverables);
-            setDirectorLinkedinBarVisible(
-              linkedinContext || directorLinkedinSessionActive() || directorHasStrategy(ws, deliverables)
-            );
+            setDirectorLinkedinBarVisible(directorLinkedinSessionActive() || linkedinContext);
             let workflowHtml = (linkedinContext ? renderProfilePanel(linkedinAnalysis) : "")
-              + renderStrategyPanel(strategy, mode)
+              + (linkedinContext ? renderStrategyPanel(strategy, mode) : "")
               + (mode === "daily_digest_review" ? renderDailyDigestPanel(dailyDigest, mode) : "")
               + (linkedinContext && mode === "optimization_review" ? renderOptimizationPanel(optimizationReport, mode) : "")
               + (linkedinContext ? renderCalendarPanel(calendar, activePostId, mode) : "")

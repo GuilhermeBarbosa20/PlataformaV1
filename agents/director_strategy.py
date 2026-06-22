@@ -48,6 +48,10 @@ STRATEGY_MARKERS = (
 LINKEDIN_MARKERS = (
     "linkedin",
     "linked in",
+    "linkdin",
+    "linkddin",
+    "likedin",
+    "linkedim",
 )
 
 LINKEDIN_GOAL_VERBS = (
@@ -174,6 +178,9 @@ def is_linkedin_strategy_intent(
     if not normalized:
         return False
 
+    if is_daily_digest_intent(normalized):
+        return False
+
     has_linkedin = text_mentions_linkedin(normalized)
     if not has_linkedin and not continue_linkedin_strategy:
         return False
@@ -193,6 +200,51 @@ def is_linkedin_strategy_intent(
     if has_linkedin and has_deadline:
         return True
     if has_numeric_target and has_deadline and (has_goal or has_strategy):
+        return True
+    return False
+
+
+def is_daily_digest_intent(text: str) -> bool:
+    """Deteta pedido de briefing diário / análise de ontem no LinkedIn.
+
+    Tem prioridade sobre estratégia quando o utilizador está em revisão de
+    plano mas pede explicitamente briefing, resumo ou melhores horas/dias.
+
+    Argumentos:
+        text: Última mensagem do utilizador.
+
+    Retorno:
+        ``True`` quando o pedido é digest/performance e não criação de estratégia.
+    """
+
+    normalized = _normalize_for_match(str(text or "").strip())
+    if not normalized:
+        return False
+    markers = (
+        "briefing",
+        "briefing diario",
+        "briefing diário",
+        "analise diaria",
+        "análise diária",
+        "analise de ontem",
+        "análise de ontem",
+        "ontem funcionou",
+        "o que funcionou ontem",
+        "o que funcionou",
+        "resumo do dia",
+        "melhores horas",
+        "melhores horarios",
+        "melhores horários",
+        "melhores dias",
+        "que dias publicar",
+        "que horas publicar",
+        "quando devo publicar",
+    )
+    if any(marker in normalized for marker in markers):
+        return True
+    if text_mentions_linkedin(normalized) and any(
+        token in normalized for token in ("ontem", "hoje", "diario", "diário", "resumo")
+    ):
         return True
     return False
 

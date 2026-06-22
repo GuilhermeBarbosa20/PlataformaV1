@@ -50,6 +50,7 @@ from agents.director_optimization import (
 from agents.director_intent import classify_director_intent
 from agents.director_strategy import (
     generate_linkedin_strategy,
+    is_daily_digest_intent,
     is_linkedin_strategy_intent,
     normalize_text as normalize_director_text,
     sanitize_strategy_chat_reply,
@@ -340,14 +341,17 @@ def _sanitize_disconnected_linkedin_state(state: Dict[str, Any]) -> None:
     state["engagement_draft"] = None
     state["engagement_batch"] = []
     state["followed_posts_queue"] = []
+    state["strategy"] = None
+    state["execution_plan"] = ""
+    channels = state.get("channels") if isinstance(state.get("channels"), list) else []
+    state["channels"] = [c for c in channels if str(c).lower() != "linkedin"]
     stage = str(state.get("stage") or STAGE_IDLE)
-    if stage in _LINKEDIN_SESSION_STAGES:
-        strategy = state.get("strategy")
-        state["stage"] = (
-            STAGE_STRATEGY_REVIEW
-            if isinstance(strategy, dict) and strategy_has_core_content(strategy)
-            else STAGE_IDLE
-        )
+    if stage in _LINKEDIN_SESSION_STAGES or stage in {
+        STAGE_STRATEGY_BRIEF,
+        STAGE_STRATEGY_REVIEW,
+        STAGE_STRATEGY_APPROVED,
+    }:
+        state["stage"] = STAGE_IDLE
 
 
 def detect_action_from_text(text: str) -> Optional[str]:
@@ -1111,6 +1115,15 @@ def _generate_and_review_strategy(
         Payload parcial com ``reply``, ``workflow_state`` e ``deliverables``.
     """
 
+    if not bool(state.get("linkedin_connected")):
+        gate = _build_linkedin_director_response(state, "")
+        gate["reply"] = (
+            "Para montar ou ajustar a **estratégia LinkedIn**, primeiro liga a conta "
+            "no painel (botão «Ligar LinkedIn»). Depois descreve os teus objectivos "
+            "e eu preparo o plano com base em dados reais do teu perfil."
+        )
+        return gate
+
     profile_ctx = profile_context_markdown(state.get("linkedin_analysis"))
     result = generate_linkedin_strategy(
         client,
@@ -1572,6 +1585,11 @@ def _classify_user_intent_with_fallback(
     confidence = float(classification.get("confidence") or 0)
     normalized = normalize_text_fn(last_user_text)
 
+    if is_daily_digest_intent(last_user_text) or is_daily_digest_intent(normalized):
+        classification["intent"] = "daily_digest"
+        classification["confidence"] = 0.92
+        return classification
+
     if confidence < 0.55 and intent in {"general_plan", "continue_current", "clarify"}:
         if _is_followed_engagement_intent(normalized):
             classification["intent"] = "followed_profiles"
@@ -1585,6 +1603,9 @@ def _classify_user_intent_with_fallback(
         elif _is_copy_only_request(normalized):
             classification["intent"] = "standalone_copy"
             classification["confidence"] = 0.78
+        elif is_daily_digest_intent(normalized):
+            classification["intent"] = "daily_digest"
+            classification["confidence"] = 0.85
         elif _should_enter_linkedin_strategy(state, last_user_text):
             classification["intent"] = "linkedin_strategy"
             classification["confidence"] = 0.75
@@ -2885,6 +2906,16 @@ def process_director_turn(
         return base_response
 
     strategy_intent = _should_enter_linkedin_strategy(state, last_user_text)
+
+    if is_daily_digest_intent(last_user_text) or is_daily_digest_intent(normalized_last):
+        try:
+            digest_result = run_daily_digest(client, openai_model, state, language)
+            base_response.update(digest_result)
+            base_response["deliverables"] = _deliverables_from_state(state)
+            return base_response
+        except Exception as exc:  # noqa: BLE001
+            base_response["reply"] = f"Não consegui gerar o briefing diário: {exc!s}"
+            return base_response
 
     if strategy_intent or (
         state.get("strategy")
