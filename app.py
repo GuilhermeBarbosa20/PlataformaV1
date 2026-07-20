@@ -75,12 +75,8 @@ from agents.social_media import (
 
 
 STATIC_DIR = BASE_DIR / "static"
-COPYWRITER_PHOTO_PATH = Path(
-    r"C:\Users\Gui\.cursor\projects\c-Users-Gui-Desktop-Cursor-Teste-PlataformaV1\assets\c__Users_Gui_AppData_Roaming_Cursor_User_workspaceStorage_5cf04d98823b3ed471fa9fcf2f9a8995_images_image-086e2d41-4ac7-4b47-94ee-d5b6a9591ec8.png"
-)
-DESIGNER_PHOTO_PATH = Path(
-    r"C:\Users\Gui\.cursor\projects\c-Users-Gui-Desktop-Cursor-Teste-PlataformaV1\assets\c__Users_Gui_AppData_Roaming_Cursor_User_workspaceStorage_5cf04d98823b3ed471fa9fcf2f9a8995_images_image-60079ec3-45f1-4734-bbfb-0c9b44f7606c.png"
-)
+COPYWRITER_PHOTO_PATH = STATIC_DIR / "copywriter-avatar.png"
+DESIGNER_PHOTO_PATH = STATIC_DIR / "designer-avatar.png"
 INSTAGRAM_OAUTH_AUTHORIZE_URL = "https://www.facebook.com/v25.0/dialog/oauth"
 INSTAGRAM_GRAPH_API_BASE_URL = "https://graph.facebook.com/v25.0"
 DATA_DIR = BASE_DIR / "data"
